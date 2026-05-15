@@ -166,22 +166,20 @@ def _apply_message_to_stats(
     event_time: Optional[datetime],
     sender_name: Optional[str] = None,
 ) -> None:
+
     is_start = _is_start(subject_text)
     is_stop = _is_stop(subject_text)
-
-    # Count start/stop notifications if:
-    # 1. Subject has "notification" keyword with start/stop, OR
-    # 2. Subject has [START] or [STOP] pattern
     is_bracket_start = "[START]" in subject_text.upper()
     is_bracket_stop = "[STOP]" in subject_text.upper()
     is_notification_type = _is_notification(subject_text)
+    is_pentest = "[PENTEST]" in subject_text.upper()
 
-    if is_bracket_start or (is_notification_type and is_start):
+    # Only count if [PENTEST] is present in subject
+    if is_pentest and (is_bracket_start or (is_notification_type and is_start)):
         stats.start_notifications_count += 1
         previous_first_start = stats.first_start_notification_at
         stats.first_start_notification_at = _earliest(stats.first_start_notification_at, event_time)
-        # Sender will be set in parse_stats_by_aaid_from_messages after finding earliest start notification
-    if is_bracket_stop or (is_notification_type and is_stop):
+    if is_pentest and (is_bracket_stop or (is_notification_type and is_stop)):
         stats.stop_notifications_count += 1
         stats.last_stop_notification_at = _latest(stats.last_stop_notification_at, event_time)
 
@@ -358,14 +356,16 @@ def parse_daily_notification_counts_by_aaid(
             continue
 
         subject_text = str(subject)
+
         is_start = _is_start(subject_text)
         is_stop = _is_stop(subject_text)
         is_bracket_start = "[START]" in subject_text.upper()
         is_bracket_stop = "[STOP]" in subject_text.upper()
         is_notification_type = _is_notification(subject_text)
+        is_pentest = "[PENTEST]" in subject_text.upper()
 
-        # Count if [START]/[STOP] or if notification type with start/stop
-        if not ((is_bracket_start or is_bracket_stop) or (is_notification_type and (is_start or is_stop))):
+        # Only count if [PENTEST] is present in subject
+        if not (is_pentest and ((is_bracket_start or is_bracket_stop) or (is_notification_type and (is_start or is_stop)))):
             continue
 
         event_time = _to_datetime(received_time)
@@ -852,7 +852,10 @@ class DashboardUI:
                 self.status_var.set("AAID search supports a maximum of 10 values.")
                 return
 
-        self._aaid_search_after_id = self.root.after(350, self.refresh)
+        # Debounce and run search in background thread
+        def run_search():
+            self.refresh()
+        self._aaid_search_after_id = self.root.after(350, run_search)
 
     def _apply_stats_to_view(self, stats: DashboardStats) -> None:
         self.start_count.set(str(stats.start_notifications_count))
@@ -921,6 +924,14 @@ class DashboardUI:
         end_idx = start_idx + self.aaid_page_size
         self.current_page_keys = self.aaid_keys[start_idx:end_idx]
 
+        if not self.current_page_keys:
+            # No results: clear details and daily listbox
+            self.selected_aaid.set("N/A")
+            self._apply_stats_to_view(DashboardStats())
+            self.daily_listbox.delete(0, tk.END)
+            self.daily_listbox.insert(tk.END, "No AAID data found for selected range.")
+            return
+
         for key in self.current_page_keys:
             item_stats = self.stats_by_aaid[key]
             display = (
@@ -985,83 +996,104 @@ class DashboardUI:
         except Exception as exc:  # noqa: BLE001 - show user-facing export failure details
             messagebox.showerror("Export Error", str(exc))
 
+
     def refresh(self):
-        # Parse AAID filter if provided
-        filter_aaid = None
-        aaid_filter_str = self.aaid_filter.get().strip()
-        if aaid_filter_str:
-            # Support comma-separated AAIDs (e.g., "AA1001,AA1002,AA1003").
-            filter_list = [aaid.strip().upper() for aaid in aaid_filter_str.split(",") if aaid.strip()]
-            if len(filter_list) > 10:
-                messagebox.showerror("Too many AAIDs", "You can search for up to 10 AAIDs at a time.")
+        # Run the loading/parsing in a background thread
+        self.status_var.set("Loading emails and parsing...")
+        self.root.after(100, self._start_refresh_thread)
+
+    def _start_refresh_thread(self):
+        thread = threading.Thread(target=self._refresh_worker, daemon=True)
+        thread.start()
+
+    def _refresh_worker(self):
+        try:
+            # Parse AAID filter if provided
+            filter_aaid = None
+            aaid_filter_str = self.aaid_filter.get().strip()
+            if aaid_filter_str:
+                filter_list = [aaid.strip().upper() for aaid in aaid_filter_str.split(",") if aaid.strip()]
+                if len(filter_list) > 10:
+                    self.root.after(0, lambda: messagebox.showerror("Too many AAIDs", "You can search for up to 10 AAIDs at a time."))
+                    self.root.after(0, lambda: self.status_var.set(""))
+                    return
+                filter_aaid = set(filter_list)
+
+            try:
+                max_emails = int(self.max_emails.get().strip())
+                if max_emails <= 0:
+                    raise ValueError("max emails must be positive")
+            except ValueError:
+                self.root.after(0, lambda: messagebox.showerror("Invalid value", "Max Emails must be a positive integer."))
+                self.root.after(0, lambda: self.status_var.set(""))
                 return
-            filter_aaid = set(filter_list)
-        
-        try:
-            max_emails = int(self.max_emails.get().strip())
-            if max_emails <= 0:
-                raise ValueError("max emails must be positive")
-        except ValueError:
-            messagebox.showerror("Invalid value", "Max Emails must be a positive integer.")
-            self.status_var.set("")
-            return
 
-        try:
-            start_date, end_date = get_date_range(
-                self.range_option.get(),
-                self.custom_start_date.get(),
-                self.custom_end_date.get(),
-            )
-        except ValueError:
-            messagebox.showerror(
-                "Invalid date range",
-                "Use Last 1 Week/1/2/6 months or enter valid custom dates in YYYY-MM-DD format.",
-            )
-            self.status_var.set("")
-            return
+            try:
+                start_date, end_date = get_date_range(
+                    self.range_option.get(),
+                    self.custom_start_date.get(),
+                    self.custom_end_date.get(),
+                )
+            except ValueError:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Invalid date range",
+                    "Use Last 1 Week/1/2/6 months or enter valid custom dates in YYYY-MM-DD format.",
+                ))
+                self.root.after(0, lambda: self.status_var.set(""))
+                return
 
-        try:
-            messages = read_messages_from_outlook(
-                folder_path=self._get_full_folder_path(),
-                max_emails=max_emails,
-                subject_contains=self.subject_contains.get(),
-                start_date=start_date,
-                end_date=end_date,
-            )
-            self.stats_by_aaid = parse_stats_by_aaid_from_messages(messages, filter_aaid=filter_aaid)
-            self.daily_counts_by_aaid = parse_daily_notification_counts_by_aaid(messages, filter_aaid=filter_aaid)
-        except Exception as exc:  # noqa: BLE001 - show user-facing error from Outlook integration
-            self.status_var.set("")
-            messagebox.showerror("Outlook Read Error", str(exc))
-            return
+            try:
+                messages = read_messages_from_outlook(
+                    folder_path=self._get_full_folder_path(),
+                    max_emails=max_emails,
+                    subject_contains=self.subject_contains.get(),
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                stats_by_aaid = parse_stats_by_aaid_from_messages(messages, filter_aaid=filter_aaid)
+                daily_counts_by_aaid = parse_daily_notification_counts_by_aaid(messages, filter_aaid=filter_aaid)
+            except Exception as exc:
+                self.root.after(0, lambda: self.status_var.set(""))
+                self.root.after(0, lambda: messagebox.showerror("Outlook Read Error", str(exc)))
+                return
 
-        # Reload AAID list and select first item
-        self._reload_aaid_list()
-
-        if not self.aaid_keys:
-            self.selected_aaid.set("N/A")
-            self._apply_stats_to_view(DashboardStats())
-            self.daily_listbox.delete(0, tk.END)
-            self.daily_listbox.insert(tk.END, "No AAID data found for selected range.")
-            return
-
-        self.aaid_listbox.selection_set(0)
-        self.on_select_aaid()
-
-        # Clear status immediately after refresh completes
-        self.status_var.set("")
+            # Update UI in main thread
+            def update_ui():
+                self.stats_by_aaid = stats_by_aaid
+                self.daily_counts_by_aaid = daily_counts_by_aaid
+                self._reload_aaid_list()
+                if not self.aaid_keys:
+                    self.selected_aaid.set("N/A")
+                    self._apply_stats_to_view(DashboardStats())
+                    self.daily_listbox.delete(0, tk.END)
+                    self.daily_listbox.insert(tk.END, "No AAID data found for selected range.")
+                else:
+                    self.aaid_listbox.selection_set(0)
+                    self.on_select_aaid()
+                self.status_var.set("")
+            self.root.after(0, update_ui)
+        except Exception as exc:
+            self.root.after(0, lambda: self.status_var.set(""))
+            self.root.after(0, lambda: messagebox.showerror("Thread Error", str(exc)))
 
     def _get_full_folder_path(self):
+        """
+        Always return the folder path prefixed with the selected mailbox name, unless the mailbox is empty.
+        This ensures only the selected mailbox is searched, never the default or all mailboxes.
+        """
         mailbox = self.selected_mailbox.get().strip()
         folder = self.folder_path.get().strip()
-        if mailbox and not folder.lower().startswith(mailbox.lower()):
-            if folder.lower().startswith("inbox"):
-                return f"{mailbox}/{folder}"
-            elif folder:
-                return f"{mailbox}/{folder}"
-            else:
-                return mailbox
-        return folder
+        if not mailbox:
+            return folder or "Inbox"
+        # Remove mailbox prefix if user typed it manually
+        if folder.lower().startswith(mailbox.lower() + "/"):
+            folder = folder[len(mailbox)+1:]
+        # Remove leading/trailing slashes
+        folder = folder.strip("/")
+        # If folder is empty, default to Inbox
+        if not folder:
+            folder = "Inbox"
+        return f"{mailbox}/{folder}"
 
 
 def main():
