@@ -1942,6 +1942,10 @@ class DashboardUI:
                 self.stats_by_aaid = stats_by_aaid
                 self.daily_counts_by_aaid = daily_counts_by_aaid
                 self.trend_stats = trend_stats
+                # Clear old details before loading new data to prevent stale results
+                self.selected_aaid.set("N/A")
+                self._apply_stats_to_view(DashboardStats())
+                self.daily_listbox.delete(0, tk.END)
                 self._reload_aaid_list()
                 self._update_statistics_panel(start_date=start_date, end_date=end_date, now=system_now)
                 self._update_stat_date_range_preview(now=system_now)
