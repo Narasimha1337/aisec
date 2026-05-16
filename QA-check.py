@@ -1857,7 +1857,8 @@ class DashboardUI:
         sorted_dates = sorted(daily_counts.keys(), reverse=True)
         for date_key in sorted_dates:
             counts = daily_counts[date_key]
-            is_alert = counts.start_count > 1 or counts.stop_count > 1
+            # Daily notifications are valid only when there is exactly 1 start and 1 stop.
+            is_alert = counts.start_count != 1 or counts.stop_count != 1
             status = "ALERT" if is_alert else "OK"
             start_text = str(counts.start_count)
             stop_text = str(counts.stop_count)
