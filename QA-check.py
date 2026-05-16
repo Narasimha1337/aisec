@@ -88,13 +88,15 @@ def _strip_prefixes(subject: str) -> str:
 
 
 def _to_datetime(received_time) -> Optional[datetime]:
-    # Outlook typically returns datetime already; convert fallback string safely.
+    # Normalize everything to local wall time so cross-region sender timezones
+    # align with how Outlook displays mail times for this user.
     if isinstance(received_time, datetime):
-        return received_time
+        return _normalize_for_comparison(received_time)
     if received_time is None:
         return None
     try:
-        return datetime.fromisoformat(str(received_time))
+        parsed = datetime.fromisoformat(str(received_time))
+        return _normalize_for_comparison(parsed)
     except ValueError:
         return None
 
