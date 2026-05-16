@@ -494,12 +494,9 @@ def get_date_range(range_option: str, custom_start: str, custom_end: str, now: O
     current = now or datetime.now()
     option = range_option.strip().lower()
 
-    # Snap presets to whole-day boundaries so today is always fully included
-    # regardless of the clock time when the dashboard is run. We also extend
-    # the end by an extra day to absorb timezone skew on Outlook ReceivedTime
-    # values that can land on "tomorrow" in local time.
+    # Snap presets to whole-day boundaries using local system time.
     today_midnight = current.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_today = current.replace(hour=23, minute=59, second=59, microsecond=999999) + timedelta(days=1)
+    end_of_today = current.replace(hour=23, minute=59, second=59, microsecond=999999)
 
     preset_days = {
         "last 1 week": 7,
@@ -1077,19 +1074,20 @@ class DashboardUI:
     def _on_range_option_changed(self, _selected=None):
         self._toggle_custom_dates()
         self._auto_adjust_max_emails()
-        self._update_stat_date_range_preview()
+        self._update_stat_date_range_preview(now=datetime.now())
 
     def _on_custom_date_changed(self, _event=None):
         if self.range_option.get() == "Custom Range":
             self._auto_adjust_max_emails()
-        self._update_stat_date_range_preview()
+        self._update_stat_date_range_preview(now=datetime.now())
 
-    def _update_stat_date_range_preview(self) -> None:
+    def _update_stat_date_range_preview(self, now: Optional[datetime] = None) -> None:
         try:
             start_date, end_date = get_date_range(
                 self.range_option.get(),
                 self.custom_start_date.get(),
                 self.custom_end_date.get(),
+                now=now,
             )
             self.stat_date_range.set(
                 f"{start_date.strftime('%Y-%m-%d')}  to  {end_date.strftime('%Y-%m-%d')}"
@@ -1495,7 +1493,12 @@ class DashboardUI:
         self._graph_figure = figure
         self._resize_graph_to_frame()
 
-    def _update_statistics_panel(self) -> None:
+    def _update_statistics_panel(
+        self,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        now: Optional[datetime] = None,
+    ) -> None:
         aggregate = compute_aggregate_statistics(self.stats_by_aaid)
         self.stat_total_apps.set(str(aggregate.total_applications))
         self.stat_avg_techqa.set(format_duration(aggregate.avg_techqa_seconds))
@@ -1506,17 +1509,23 @@ class DashboardUI:
         self.stat_techqa_sample.set(str(aggregate.techqa_sample_size))
         self.stat_finalqa_sample.set(str(aggregate.finalqa_sample_size))
 
-        try:
-            start_date, end_date = get_date_range(
-                self.range_option.get(),
-                self.custom_start_date.get(),
-                self.custom_end_date.get(),
-            )
+        if start_date is not None and end_date is not None:
             self.stat_date_range.set(
                 f"{start_date.strftime('%Y-%m-%d')}  to  {end_date.strftime('%Y-%m-%d')}"
             )
-        except Exception:
-            self.stat_date_range.set(self.range_option.get())
+        else:
+            try:
+                computed_start, computed_end = get_date_range(
+                    self.range_option.get(),
+                    self.custom_start_date.get(),
+                    self.custom_end_date.get(),
+                    now=now,
+                )
+                self.stat_date_range.set(
+                    f"{computed_start.strftime('%Y-%m-%d')}  to  {computed_end.strftime('%Y-%m-%d')}"
+                )
+            except Exception:
+                self.stat_date_range.set(self.range_option.get())
 
         # Graph section removed from UI.
 
@@ -1685,6 +1694,7 @@ class DashboardUI:
     def _refresh_worker(self):
         try:
             self._log_debug("Starting refresh worker.")
+            system_now = datetime.now()
             filter_aaid = None
             aaid_filter_str = self.aaid_filter.get().strip()
             if aaid_filter_str:
@@ -1717,6 +1727,7 @@ class DashboardUI:
                     self.range_option.get(),
                     self.custom_start_date.get(),
                     self.custom_end_date.get(),
+                    now=system_now,
                 )
             except ValueError:
                 self.root.after(0, lambda: messagebox.showerror(
@@ -1755,7 +1766,8 @@ class DashboardUI:
                 self.daily_counts_by_aaid = daily_counts_by_aaid
                 self.trend_stats = trend_stats
                 self._reload_aaid_list()
-                self._update_statistics_panel()
+                self._update_statistics_panel(start_date=start_date, end_date=end_date, now=system_now)
+                self._update_stat_date_range_preview(now=system_now)
                 if not self.aaid_keys:
                     self.selected_aaid.set("N/A")
                     self._apply_stats_to_view(DashboardStats())
