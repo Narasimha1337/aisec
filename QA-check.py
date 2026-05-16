@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta
 from tkinter import filedialog, messagebox
 from typing import Iterable, Optional
 import threading
+import pythoncom
 
 
 START_RE = re.compile(r"\bstart(?:ed)?\b", re.IGNORECASE)
@@ -843,6 +844,8 @@ def read_messages_from_outlook(
     end_date: Optional[datetime] = None,
 ) -> list[tuple[str, object, Optional[str], str]]:
     import win32com.client  # Local import so tests can run without Outlook dependency.
+    import pythoncom
+    pythoncom.CoInitialize()
 
     outlook = win32com.client.Dispatch("Outlook.Application")
     namespace = outlook.GetNamespace("MAPI")
@@ -1017,7 +1020,6 @@ class DashboardUI:
         self._graph_figure = None
         self._graph_resize_after_id: Optional[str] = None
 
-        self._init_mailboxes()
         self._build()
         self._auto_adjust_max_emails()
         self._update_stat_date_range_preview()
@@ -1034,6 +1036,8 @@ class DashboardUI:
     def _init_mailboxes(self):
         try:
             import win32com.client
+            import pythoncom
+            pythoncom.CoInitialize()
             outlook = win32com.client.Dispatch("Outlook.Application")
             namespace = outlook.GetNamespace("MAPI")
             # Ignore 'Online Archive' roots
@@ -1122,7 +1126,9 @@ class DashboardUI:
         tk.Label(frame, text="Mailbox:").grid(row=0, column=0, sticky="w", pady=(2, 2))
         mailbox_row = tk.Frame(frame)
         mailbox_row.grid(row=0, column=1, columnspan=2, sticky="w", pady=(2, 2))
-        mailbox_menu = tk.OptionMenu(mailbox_row, self.selected_mailbox, *self.mailbox_names)
+        # Ensure OptionMenu always has at least one value to avoid init error
+        mailbox_options = self.mailbox_names if self.mailbox_names else ["Default Mailbox"]
+        mailbox_menu = tk.OptionMenu(mailbox_row, self.selected_mailbox, *mailbox_options)
         mailbox_menu.pack(side="left")
         tk.Checkbutton(mailbox_row, text="Enable Debug Logs", variable=self.debug_enabled).pack(
             side="left", padx=(10, 0)
@@ -1648,6 +1654,12 @@ class DashboardUI:
             messagebox.showerror("Export Error", str(exc))
 
     def refresh(self):
+        # Initialize mailboxes only if not already loaded (or always, if you want to refresh list)
+        if not self.mailbox_names or self.mailbox_names == ["Default Mailbox"]:
+            self._init_mailboxes()
+            # If only initializing mailboxes, do not start refresh thread
+            self.status_var.set("Ready.")
+            return
         self.status_var.set("Loading emails and parsing...")
         self.root.after(100, self._start_refresh_thread)
 
