@@ -105,8 +105,10 @@ def _normalize_for_comparison(value: Optional[datetime]) -> Optional[datetime]:
     if value is None:
         return None
     if value.tzinfo is not None:
-        # Convert aware datetimes to local wall time and drop tzinfo so all comparisons use same type.
-        return value.astimezone().replace(tzinfo=None)
+        # Outlook ReceivedTime is already displayed in local wall time for the
+        # current profile. Preserve that wall-clock and only drop tzinfo so
+        # date bucketing doesn't shift yesterday mails into today.
+        return value.replace(tzinfo=None)
     return value
 
 
