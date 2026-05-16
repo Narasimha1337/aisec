@@ -1041,17 +1041,29 @@ class DashboardUI:
             pythoncom.CoInitialize()
             outlook = win32com.client.Dispatch("Outlook.Application")
             namespace = outlook.GetNamespace("MAPI")
-            # Ignore 'Online Archive' roots
-            self.mailbox_names = [
-                str(namespace.Folders.Item(i).Name)
-                for i in range(1, namespace.Folders.Count + 1)
-                if not str(namespace.Folders.Item(i).Name).strip().lower().startswith("online archive")
-            ]
-            if self.mailbox_names:
-                self.selected_mailbox.set(self.mailbox_names[0])
-            else:
-                self.mailbox_names = ["Default Mailbox"]
-                self.selected_mailbox.set("Default Mailbox")
+            mailbox_names = []
+            def is_mail_folder(folder):
+                try:
+                    PR_CONTAINER_CLASS = 0x3613001E
+                    container_class = folder.PropertyAccessor.GetProperty(f"http://schemas.microsoft.com/mapi/proptag/{PR_CONTAINER_CLASS:08X}")
+                    return container_class == "IPF.Note"
+                except Exception:
+                    # Fallback: check for Inbox, Sent Items, etc.
+                    mail_names = ["Inbox", "Sent Items", "Drafts", "Outbox", "Deleted Items", "Junk Email"]
+                    return folder.Name in mail_names or hasattr(folder, 'Items')
+
+            for i in range(1, namespace.Folders.Count + 1):
+                folder = namespace.Folders.Item(i)
+                name = str(folder.Name).strip()
+                # Exclude Online Archive roots
+                if name.lower().startswith("online archive"):
+                    continue
+                # Only add root mailbox/account name
+                mailbox_names.append(name)
+            # Remove duplicates and sort
+            mailbox_names = sorted(set(mailbox_names))
+            self.mailbox_names = mailbox_names if mailbox_names else ["Default Mailbox"]
+            self.selected_mailbox.set(self.mailbox_names[0])
         except Exception:
             self.mailbox_names = ["Default Mailbox"]
             self.selected_mailbox.set("Default Mailbox")
