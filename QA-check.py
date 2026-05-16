@@ -1020,6 +1020,7 @@ class DashboardUI:
         self._graph_figure = None
         self._graph_resize_after_id: Optional[str] = None
 
+        self._init_mailboxes()
         self._build()
         self._auto_adjust_max_emails()
         self._update_stat_date_range_preview()
@@ -1133,6 +1134,8 @@ class DashboardUI:
         tk.Checkbutton(mailbox_row, text="Enable Debug Logs", variable=self.debug_enabled).pack(
             side="left", padx=(10, 0)
         )
+
+    # _reload_mailboxes removed; mailboxes now load automatically at startup
 
         tk.Label(frame, text="Outlook Folder (use /):").grid(row=1, column=0, sticky="w")
         tk.Entry(frame, textvariable=self.folder_path, width=50).grid(row=1, column=1, sticky="ew", pady=4)
