@@ -222,6 +222,12 @@ def _apply_message_to_stats(
 ) -> None:
 
 
+
+    # Exclude automatic replies from notification stats
+    lowered = subject_text.lower()
+    if "automatic reply" in lowered or "autoreply" in lowered or "auto-reply" in lowered:
+        return
+
     is_start = _is_start(subject_text)
     is_stop = _is_stop(subject_text)
     is_bracket_start = "[START]" in subject_text.upper()
@@ -451,6 +457,12 @@ def parse_daily_notification_counts_by_aaid(
             continue
 
         subject_text = str(subject)
+
+
+        # Exclude automatic replies from notification stats
+        lowered = subject_text.lower()
+        if "automatic reply" in lowered or "autoreply" in lowered or "auto-reply" in lowered:
+            continue
 
         is_start = _is_start(subject_text)
         is_stop = _is_stop(subject_text)
