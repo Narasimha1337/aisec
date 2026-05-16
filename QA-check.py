@@ -41,6 +41,8 @@ class DashboardStats:
     first_start_notification_sender: Optional[str] = None
     last_stop_notification_at: Optional[datetime] = None
     completion_days_count: Optional[int] = None
+    is_test_run: bool = False  # True if minimal test: exactly 1 START + 1 STOP
+    has_techqa_overlap: bool = False  # True if TechQA started during testing
 
 
 @dataclass
@@ -443,6 +445,15 @@ def parse_stats_by_aaid_from_messages(messages: Iterable[tuple[str, object]], fi
                 stats.first_start_notification_at.date(),
                 stats.last_stop_notification_at.date(),
             )
+        
+        # Flag if this is a minimal test run (1 START + 1 STOP only)
+        if stats.start_notifications_count == 1 and stats.stop_notifications_count == 1:
+            stats.is_test_run = True
+        
+        # Flag if TechQA started during or before testing was completed
+        if stats.techqa_milestone_at and stats.last_stop_notification_at:
+            if stats.techqa_milestone_at <= stats.last_stop_notification_at:
+                stats.has_techqa_overlap = True
 
     return stats_by_aaid
 
@@ -1083,6 +1094,8 @@ class DashboardUI:
         self.techqa_milestone_at = tk.StringVar(value="N/A")
         self.techqa_person = tk.StringVar(value="N/A")
         self.finalqa_person = tk.StringVar(value="N/A")
+        self.is_test_run = tk.StringVar(value="N/A")
+        self.has_techqa_overlap = tk.StringVar(value="N/A")
         self.aaid_keys: list[str] = []
         self.current_page_keys: list[str] = []
         self.stats_by_aaid: dict[str, DashboardStats] = {}
@@ -1370,22 +1383,22 @@ class DashboardUI:
         add_metric_pair(14, "TechQA Person:", self.techqa_person, "Final QA Person:", self.finalqa_person, top_pad=1, bottom_pad=1)
 
         tk.Label(detail_panel, text="Daily Notification Check (expected 1 start and 1 stop):").grid(
-            row=15, column=0, columnspan=4, sticky="w", pady=(6, 2)
+            row=15, column=0, columnspan=4, sticky="w", pady=(6,2)  # Ensure no padding
         )
-        daily_list_frame = tk.Frame(detail_panel)
-        daily_list_frame.grid(row=16, column=0, columnspan=4, sticky="nsew")
+        daily_list_frame = tk.Frame(detail_panel, height=100)  # Explicitly set height to control space
+        daily_list_frame.grid(row=16, column=0, columnspan=4, sticky="nsew")  # Ensure no padding
         daily_list_frame.grid_rowconfigure(0, weight=1)
         daily_list_frame.grid_columnconfigure(0, weight=1)
 
         self.daily_listbox = tk.Listbox(
             daily_list_frame,
             exportselection=False,
-            height=5,
-            width=66,
+            height=5,  # Adjusted height to reduce space
+            width=70,  # Retained adjusted width
             xscrollcommand=lambda *args: daily_h_scroll.set(*args),
             yscrollcommand=lambda *args: daily_v_scroll.set(*args),
         )
-        self.daily_listbox.grid(row=0, column=0, sticky="nsew")
+        self.daily_listbox.grid(row=0, column=0, sticky="nsew")  # Ensure alignment within the frame
 
         daily_v_scroll = tk.Scrollbar(daily_list_frame, orient="vertical", command=self.daily_listbox.yview)
         daily_v_scroll.grid(row=0, column=1, sticky="ns")
@@ -1665,6 +1678,8 @@ class DashboardUI:
         self.techqa_milestone_at.set(_format_dt(stats.techqa_milestone_at))
         self.techqa_person.set(stats.techqa_person or "N/A")
         self.finalqa_person.set(stats.finalqa_person or "N/A")
+        self.is_test_run.set("Yes" if stats.is_test_run else "No")
+        self.has_techqa_overlap.set("Yes" if stats.has_techqa_overlap else "No")
 
     def _go_prev_page(self) -> None:
         if self.aaid_current_page <= 0:
@@ -1789,10 +1804,20 @@ class DashboardUI:
 
         for key in self.current_page_keys:
             item_stats = self.stats_by_aaid[key]
+            flags = []
+            if item_stats.is_test_run:
+                flags.append("[TEST]")
+            if item_stats.has_techqa_overlap:
+                flags.append("[TechQA Overlap]")
+            flags_str = " ".join(flags)
+            
             if self._is_qa_only_aaid(item_stats):
                 display = f"QA - {key}"
             else:
                 display = f"{key}  |  Start: {item_stats.start_notifications_count}  Stop: {item_stats.stop_notifications_count}"
+            
+            if flags_str:
+                display += f"  {flags_str}"
             self.aaid_listbox.insert(tk.END, display)
 
     def on_select_aaid(self, _event=None):
@@ -1811,6 +1836,19 @@ class DashboardUI:
 
     def _load_daily_counts_for_aaid(self, aaid: str) -> None:
         self.daily_listbox.delete(0, tk.END)
+        
+        # Show test run and techqa overlap flags at the top
+        stats = self.stats_by_aaid.get(aaid)
+        if stats:
+            flags = []
+            if stats.is_test_run:
+                flags.append("[TEST RUN]")
+            if stats.has_techqa_overlap:
+                flags.append("[TechQA Overlap]")
+            if flags:
+                self.daily_listbox.insert(tk.END, " ".join(flags))
+                self.daily_listbox.itemconfig(0, fg="blue")
+        
         daily_counts = self.daily_counts_by_aaid.get(aaid, {})
         if not daily_counts:
             self.daily_listbox.insert(tk.END, "No notification entries for this AAID in selected range.")
