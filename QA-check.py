@@ -242,22 +242,12 @@ def _apply_message_to_stats(
     # Only count if [PENTEST] is present in subject
     if is_pentest and (is_bracket_start or (is_notification_type and is_start)):
         stats.raw_start_notifications_count += 1
-        start_key = _sender_dedupe_key(sender_name)
-        seen_start = getattr(stats, "_seen_start_notification_senders", set())
-        if start_key not in seen_start:
-            seen_start.add(start_key)
-            setattr(stats, "_seen_start_notification_senders", seen_start)
-            stats.start_notifications_count += 1
+        stats.start_notifications_count += 1
         previous_first_start = stats.first_start_notification_at
         stats.first_start_notification_at = _earliest(stats.first_start_notification_at, event_time)
     if is_pentest and (is_bracket_stop or (is_notification_type and is_stop)):
         stats.raw_stop_notifications_count += 1
-        stop_key = _sender_dedupe_key(sender_name)
-        seen_stop = getattr(stats, "_seen_stop_notification_senders", set())
-        if stop_key not in seen_stop:
-            seen_stop.add(stop_key)
-            setattr(stats, "_seen_stop_notification_senders", seen_stop)
-            stats.stop_notifications_count += 1
+        stats.stop_notifications_count += 1
         stats.last_stop_notification_at = _latest(stats.last_stop_notification_at, event_time)
 
     # TechQA / FinalQA subjects don't carry [START]/[STOP] brackets and the
