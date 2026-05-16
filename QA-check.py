@@ -158,6 +158,12 @@ def _sender_dedupe_key(sender_name: Optional[str]) -> str:
     return normalized.casefold()
 
 
+def _same_person(left: Optional[str], right: Optional[str]) -> bool:
+    if left is None or right is None:
+        return False
+    return _sender_dedupe_key(left) == _sender_dedupe_key(right)
+
+
 def _unpack_message(message) -> tuple[str, object, Optional[str], str]:
     if len(message) >= 4:
         subject, received_time, sender_name, body_text = message[:4]
@@ -211,7 +217,16 @@ def _sanitize_excel_cell(value: object) -> object:
 def count_days_inclusive(start_day: date, end_day: date) -> int:
     if end_day < start_day:
         return 0
-    return (end_day - start_day).days + 1
+
+    # Count business days only (Mon-Fri) to avoid inflating completion duration
+    # with weekends when comparing QA start/stop timelines.
+    count = 0
+    current = start_day
+    while current <= end_day:
+        if current.weekday() < 5:
+            count += 1
+        current += timedelta(days=1)
+    return count
 
 
 def _apply_message_to_stats(
@@ -368,7 +383,7 @@ def parse_stats_by_aaid_from_messages(messages: Iterable[tuple[str, object]], fi
             and stats.techqa_milestone_at is None
             and tester_name is not None
             and sender_name is not None
-            and sender_name == tester_name
+            and _same_person(sender_name, tester_name)
         ):
             stats.techqa_milestone_at = event_time
 
@@ -376,7 +391,8 @@ def parse_stats_by_aaid_from_messages(messages: Iterable[tuple[str, object]], fi
             _is_techqa(subject)
             and stats.techqa_person is None
             and sender_name is not None
-            and (tester_name is None or sender_name != tester_name)
+            and not _same_person(sender_name, tester_name)
+            and not _same_person(sender_name, stats.finalqa_person)
         ):
             stats.techqa_person = sender_name
 
@@ -398,7 +414,7 @@ def parse_stats_by_aaid_from_messages(messages: Iterable[tuple[str, object]], fi
             and stats.techqa_stop is None
             and stats.techqa_person is not None
             and sender_name is not None
-            and sender_name == stats.techqa_person
+            and _same_person(sender_name, stats.techqa_person)
         ):
             stats.techqa_stop = event_time
 
@@ -406,7 +422,8 @@ def parse_stats_by_aaid_from_messages(messages: Iterable[tuple[str, object]], fi
             _is_finalqa(subject)
             and stats.finalqa_person is None
             and sender_name is not None
-            and (tester_name is None or sender_name != tester_name)
+            and not _same_person(sender_name, tester_name)
+            and not _same_person(sender_name, stats.techqa_person)
         ):
             stats.finalqa_person = sender_name
 
@@ -981,6 +998,58 @@ def read_messages_from_outlook(
 
 
 class DashboardUI:
+    def _set_sort_mode(self, mode):
+        self.aaid_sort_mode = mode
+        self._reload_aaid_list(reset_page=True)
+
+    def _is_qa_only_aaid(self, stats: DashboardStats) -> bool:
+        has_notifications = stats.start_notifications_count > 0 or stats.stop_notifications_count > 0
+        has_qa_signals = any(
+            value is not None
+            for value in (
+                stats.techqa_start,
+                stats.techqa_stop,
+                stats.finalqa_start,
+                stats.finalqa_stop,
+                stats.techqa_milestone_at,
+                stats.techqa_person,
+                stats.finalqa_person,
+            )
+        )
+        return (not has_notifications) and has_qa_signals
+
+    def _datetime_sort_value(self, value: Optional[datetime]) -> Optional[int]:
+        if value is None:
+            return None
+        return (
+            value.toordinal() * 86400
+            + value.hour * 3600
+            + value.minute * 60
+            + value.second
+        )
+
+    def _qa_start_proxy(self, stats: DashboardStats) -> Optional[datetime]:
+        candidates = [
+            stats.techqa_start,
+            stats.techqa_milestone_at,
+            stats.finalqa_start,
+        ]
+        available = [dt for dt in candidates if dt is not None]
+        if not available:
+            return None
+        return min(available)
+
+    def _qa_stop_proxy(self, stats: DashboardStats) -> Optional[datetime]:
+        candidates = [
+            stats.techqa_stop,
+            stats.finalqa_stop,
+            stats.finalqa_start,
+        ]
+        available = [dt for dt in candidates if dt is not None]
+        if not available:
+            return None
+        return max(available)
+
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Outlook QA Dashboard")
@@ -1023,6 +1092,7 @@ class DashboardUI:
         self.aaid_current_page = 0
         self.aaid_total_pages = 0
         self.aaid_page_info = tk.StringVar(value="Total: 0 | Page: 0/0")
+        self.aaid_sort_mode = "start_desc"
 
         self.status_var = tk.StringVar(value="Ready.")
         self.status_label = tk.Label(self.root, textvariable=self.status_var, anchor="w", fg="blue")
@@ -1160,6 +1230,15 @@ class DashboardUI:
         stats_panel = tk.LabelFrame(frame, text="Statistics", padx=10, pady=6)
         stats_panel.grid(row=0, column=4, rowspan=7, sticky="nsew", padx=(8, 0), pady=(2, 8))
         self._build_statistics_panel(stats_panel)
+
+        # Sorting controls for AAID results
+        sort_frame = tk.Frame(frame)
+        sort_frame.grid(row=8, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        tk.Label(sort_frame, text="Sort by:").pack(side="left")
+        tk.Button(sort_frame, text="Start ↑", width=8, command=lambda: self._set_sort_mode("start_asc")).pack(side="left", padx=2)
+        tk.Button(sort_frame, text="Start ↓", width=8, command=lambda: self._set_sort_mode("start_desc")).pack(side="left", padx=2)
+        tk.Button(sort_frame, text="Stop ↑", width=8, command=lambda: self._set_sort_mode("stop_asc")).pack(side="left", padx=2)
+        tk.Button(sort_frame, text="Stop ↓", width=8, command=lambda: self._set_sort_mode("stop_desc")).pack(side="left", padx=2)
 
         tk.Label(frame, text="Mailbox:").grid(row=0, column=0, sticky="w", pady=(2, 2))
         mailbox_row = tk.Frame(frame)
@@ -1624,7 +1703,75 @@ class DashboardUI:
 
     def _reload_aaid_list(self, reset_page: bool = True) -> None:
         self.aaid_listbox.delete(0, tk.END)
-        self.aaid_keys = sorted(self.stats_by_aaid.keys())
+        mode = self.aaid_sort_mode if hasattr(self, 'aaid_sort_mode') else "start_desc"
+        all_keys = list(self.stats_by_aaid.keys())
+
+        def group_key(aaid_key: str) -> int:
+            stats = self.stats_by_aaid[aaid_key]
+            has_notifications = stats.start_notifications_count > 0 or stats.stop_notifications_count > 0
+            if has_notifications:
+                return 0
+            if self._is_qa_only_aaid(stats):
+                return 1
+            return 2
+
+        if mode == "start_asc":
+            value_key = lambda k: (self.stats_by_aaid[k].start_notifications_count, k)
+            notification_keys = sorted((k for k in all_keys if group_key(k) == 0), key=value_key)
+        elif mode == "start_desc":
+            value_key = lambda k: (self.stats_by_aaid[k].start_notifications_count, k)
+            notification_keys = sorted((k for k in all_keys if group_key(k) == 0), key=value_key, reverse=True)
+        elif mode == "stop_asc":
+            value_key = lambda k: (self.stats_by_aaid[k].stop_notifications_count, k)
+            notification_keys = sorted((k for k in all_keys if group_key(k) == 0), key=value_key)
+        elif mode == "stop_desc":
+            value_key = lambda k: (self.stats_by_aaid[k].stop_notifications_count, k)
+            notification_keys = sorted((k for k in all_keys if group_key(k) == 0), key=value_key, reverse=True)
+        else:
+            notification_keys = sorted((k for k in all_keys if group_key(k) == 0))
+
+        qa_only_candidates = [k for k in all_keys if group_key(k) == 1]
+        if mode == "start_asc":
+            qa_only_keys = sorted(
+                qa_only_candidates,
+                key=lambda k: (
+                    self._qa_start_proxy(self.stats_by_aaid[k]) is None,
+                    self._datetime_sort_value(self._qa_start_proxy(self.stats_by_aaid[k])) or 0,
+                    k,
+                ),
+            )
+        elif mode == "start_desc":
+            qa_only_keys = sorted(
+                qa_only_candidates,
+                key=lambda k: (
+                    self._qa_start_proxy(self.stats_by_aaid[k]) is None,
+                    -(self._datetime_sort_value(self._qa_start_proxy(self.stats_by_aaid[k])) or 0),
+                    k,
+                ),
+            )
+        elif mode == "stop_asc":
+            qa_only_keys = sorted(
+                qa_only_candidates,
+                key=lambda k: (
+                    self._qa_stop_proxy(self.stats_by_aaid[k]) is None,
+                    self._datetime_sort_value(self._qa_stop_proxy(self.stats_by_aaid[k])) or 0,
+                    k,
+                ),
+            )
+        elif mode == "stop_desc":
+            qa_only_keys = sorted(
+                qa_only_candidates,
+                key=lambda k: (
+                    self._qa_stop_proxy(self.stats_by_aaid[k]) is None,
+                    -(self._datetime_sort_value(self._qa_stop_proxy(self.stats_by_aaid[k])) or 0),
+                    k,
+                ),
+            )
+        else:
+            qa_only_keys = sorted(qa_only_candidates)
+
+        other_keys = sorted((k for k in all_keys if group_key(k) == 2))
+        self.aaid_keys = notification_keys + qa_only_keys + other_keys
         if reset_page:
             self.aaid_current_page = 0
         self._update_pagination_controls()
@@ -1642,7 +1789,10 @@ class DashboardUI:
 
         for key in self.current_page_keys:
             item_stats = self.stats_by_aaid[key]
-            display = f"{key}  |  Start: {item_stats.start_notifications_count}  Stop: {item_stats.stop_notifications_count}"
+            if self._is_qa_only_aaid(item_stats):
+                display = f"QA - {key}"
+            else:
+                display = f"{key}  |  Start: {item_stats.start_notifications_count}  Stop: {item_stats.stop_notifications_count}"
             self.aaid_listbox.insert(tk.END, display)
 
     def on_select_aaid(self, _event=None):
