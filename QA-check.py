@@ -88,15 +88,31 @@ def _strip_prefixes(subject: str) -> str:
 
 
 def _to_datetime(received_time) -> Optional[datetime]:
-    # Normalize everything to local wall time so cross-region sender timezones
-    # align with how Outlook displays mail times for this user.
+    # Preserve Outlook wall-clock time exactly so fetched timestamps match what
+    # the user sees in Outlook UI.
     if isinstance(received_time, datetime):
-        return _normalize_for_comparison(received_time)
+        return datetime(
+            received_time.year,
+            received_time.month,
+            received_time.day,
+            received_time.hour,
+            received_time.minute,
+            received_time.second,
+            received_time.microsecond,
+        )
     if received_time is None:
         return None
     try:
         parsed = datetime.fromisoformat(str(received_time))
-        return _normalize_for_comparison(parsed)
+        return datetime(
+            parsed.year,
+            parsed.month,
+            parsed.day,
+            parsed.hour,
+            parsed.minute,
+            parsed.second,
+            parsed.microsecond,
+        )
     except ValueError:
         return None
 
@@ -903,6 +919,11 @@ def read_messages_from_outlook(
 
         received_time = _to_datetime(getattr(item, "ReceivedTime", None))
         normalized_received = _normalize_for_comparison(received_time)
+        if debug_log:
+            debug_log.write(
+                f"[TIME_CHECK] raw={_safe_log_text(getattr(item, 'ReceivedTime', None))} | "
+                f"parsed={_safe_log_text(received_time)}\n"
+            )
 
         if normalized_end and normalized_received and normalized_received > normalized_end:
             skipped_by_date_count += 1
