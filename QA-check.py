@@ -26,6 +26,7 @@ AAID_PATTERNS = [
 ]
 EXCEL_FORMULA_PREFIXES = ("=", "+", "-", "@")
 MAX_EMAILS_LIMIT = 5000
+ALL_MAILBOXES_OPTION = "All Mailboxes"
 RUNTIME_DEPENDENCIES: list[tuple[str, str]] = [
     ("pywin32", "win32com"),
     ("openpyxl", "openpyxl"),
@@ -969,14 +970,14 @@ def get_outlook_folder(namespace, folder_path: str):
         ) from exc
 
 
-def read_messages_from_outlook(
+def _read_messages_from_folder(
+    namespace,
     folder_path: str,
     max_emails: int,
     subject_contains: str,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> list[tuple[str, object, Optional[str], str]]:
-    namespace = _get_outlook_namespace()
     folder = get_outlook_folder(namespace, folder_path)
 
     items = folder.Items
@@ -1093,6 +1094,73 @@ def read_messages_from_outlook(
         debug_log.close()
 
     return results
+
+
+def read_messages_from_outlook(
+    folder_path: str,
+    max_emails: int,
+    subject_contains: str,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> list[tuple[str, object, Optional[str], str]]:
+    namespace = _get_outlook_namespace()
+    return _read_messages_from_folder(
+        namespace=namespace,
+        folder_path=folder_path,
+        max_emails=max_emails,
+        subject_contains=subject_contains,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
+def read_messages_from_all_mailboxes(
+    mailbox_names: list[str],
+    folder_path: str,
+    max_emails: int,
+    subject_contains: str,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> list[tuple[str, object, Optional[str], str]]:
+    namespace = _get_outlook_namespace()
+    aggregated: list[tuple[str, object, Optional[str], str]] = []
+    relative_folder = (folder_path or "Inbox").strip("/")
+    if not relative_folder:
+        relative_folder = "Inbox"
+
+    for mailbox in mailbox_names:
+        if mailbox in {ALL_MAILBOXES_OPTION, "Default Mailbox"}:
+            continue
+        if mailbox.lower().startswith("online archive"):
+            continue
+
+        mailbox_relative = relative_folder
+        prefix = f"{mailbox}/"
+        if mailbox_relative.lower().startswith(prefix.lower()):
+            mailbox_relative = mailbox_relative[len(prefix):].strip("/")
+            if not mailbox_relative:
+                mailbox_relative = "Inbox"
+
+        full_folder_path = f"{mailbox}/{mailbox_relative}"
+        remaining = max(max_emails - len(aggregated), 0)
+        if remaining <= 0:
+            break
+        try:
+            aggregated.extend(
+                _read_messages_from_folder(
+                    namespace=namespace,
+                    folder_path=full_folder_path,
+                    max_emails=remaining,
+                    subject_contains=subject_contains,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+            )
+        except OutlookFolderNotFoundError:
+            # If a mailbox doesn't have the requested folder path, continue others.
+            continue
+
+    return aggregated
 
 
 class DashboardUI:
@@ -1263,7 +1331,10 @@ class DashboardUI:
             mailbox_names = sorted(set(mailbox_names))
 
             def update_success_ui() -> None:
-                self.mailbox_names = mailbox_names if mailbox_names else ["Default Mailbox"]
+                if mailbox_names:
+                    self.mailbox_names = [ALL_MAILBOXES_OPTION] + mailbox_names
+                else:
+                    self.mailbox_names = ["Default Mailbox"]
                 self.selected_mailbox.set(self.mailbox_names[0])
                 self._refresh_mailbox_dropdown()
                 self._mailbox_init_in_progress = False
@@ -2082,14 +2153,25 @@ class DashboardUI:
                 return
 
             try:
-                folder_path = self._get_full_folder_path()
-                messages = read_messages_from_outlook(
-                    folder_path=folder_path,
-                    max_emails=max_emails,
-                    subject_contains=subject_contains,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
+                selected_mailbox = self.selected_mailbox.get().strip()
+                if selected_mailbox == ALL_MAILBOXES_OPTION:
+                    messages = read_messages_from_all_mailboxes(
+                        mailbox_names=self.mailbox_names,
+                        folder_path=self.folder_path.get().strip(),
+                        max_emails=max_emails,
+                        subject_contains=subject_contains,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                else:
+                    folder_path = self._get_full_folder_path()
+                    messages = read_messages_from_outlook(
+                        folder_path=folder_path,
+                        max_emails=max_emails,
+                        subject_contains=subject_contains,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
                 self._log_debug(f"Total messages fetched: {len(messages)}")
                 for msg in messages:
                     subject = msg[0] if msg else ""
@@ -2142,7 +2224,11 @@ class DashboardUI:
     def _get_full_folder_path(self):
         mailbox = self.selected_mailbox.get().strip()
         folder = self.folder_path.get().strip()
-        if not mailbox or mailbox.lower() == "default mailbox":
+        if (
+            not mailbox
+            or mailbox.lower() == "default mailbox"
+            or mailbox == ALL_MAILBOXES_OPTION
+        ):
             return folder or "Inbox"
         if folder.lower().startswith(mailbox.lower() + "/"):
             folder = folder[len(mailbox) + 1:]
