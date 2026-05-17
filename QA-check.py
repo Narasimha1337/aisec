@@ -51,6 +51,8 @@ class DailyNotificationCounts:
     stop_count: int = 0
     raw_start_count: int = 0
     raw_stop_count: int = 0
+    start_time: Optional[datetime] = None
+    stop_time: Optional[datetime] = None
 
 
 class OutlookFolderNotFoundError(Exception):
@@ -535,12 +537,18 @@ def parse_daily_notification_counts_by_aaid(
 
         if is_bracket_start or (is_notification_type and is_start):
             day_counts.raw_start_count += 1
+            # Track the first start time
+            if day_counts.start_time is None:
+                day_counts.start_time = event_time
             start_seen = seen_daily_start_senders.setdefault(sender_bucket_key, set())
             if sender_key not in start_seen:
                 start_seen.add(sender_key)
                 day_counts.start_count += 1
         if is_bracket_stop or (is_notification_type and is_stop):
             day_counts.raw_stop_count += 1
+            # Track the last stop time
+            if day_counts.stop_time is None or event_time > day_counts.stop_time:
+                day_counts.stop_time = event_time
             stop_seen = seen_daily_stop_senders.setdefault(sender_bucket_key, set())
             if sender_key not in stop_seen:
                 stop_seen.add(sender_key)
@@ -921,7 +929,8 @@ def read_messages_from_outlook(
     items.Sort("[ReceivedTime]", True)
 
     results: list[tuple[str, object, Optional[str], str]] = []
-    filter_text = subject_contains.strip().lower()
+    # Parse comma-separated keywords for subject filter (supports: "AA123, BB456, CC789")
+    keywords = [kw.strip().lower() for kw in subject_contains.strip().split(",") if kw.strip()]
     normalized_start = _normalize_for_comparison(start_date)
     normalized_end = _normalize_for_comparison(end_date)
     count = 0
@@ -930,7 +939,10 @@ def read_messages_from_outlook(
     # DEBUG: Log every subject fetched from Outlook
     try:
         debug_log = open("outlook_qa_dashboard_debug.log", "a", encoding="utf-8")
-        debug_log.write(f"[FILTER] Subject contains filter: '{_safe_log_text(filter_text)}'\n")
+        if keywords:
+            debug_log.write(f"[FILTER] Subject contains keywords (any match): {keywords}\n")
+        else:
+            debug_log.write(f"[FILTER] No subject filter applied\n")
         debug_log.write(
             "[FILTER] Strict mode: only subjects containing '[PENTEST]', "
             "'Tech QA' / 'techqa', or 'Final QA' / 'finalqa' will be read.\n"
@@ -944,6 +956,7 @@ def read_messages_from_outlook(
 
     # Strict subject match: read [PENTEST] thread emails plus any TechQA / Final QA
     # related messages (these keywords drive the dashboard's QA milestones).
+    # If custom keywords are provided, also require matching those keywords (AND logic).
     pentest_event_re = re.compile(
         r"\[PENTEST\]|\btech\s*qa\b|\btechqa\b|\bfinal\s*qa\b|\bfinalqa\b",
         re.IGNORECASE,
@@ -960,8 +973,15 @@ def read_messages_from_outlook(
 
         subject = getattr(item, "Subject", "") or ""
 
-        # Skip anything that isn't a [PENTEST] [START]/[STOP] message before doing any further work.
+        # Must match strict keywords ([PENTEST], Tech QA, Final QA)
         if not pentest_event_re.search(subject):
+            continue
+
+        # If custom keywords provided, also require matching (AND condition)
+        if keywords and not any(kw in subject.lower() for kw in keywords):
+            skipped_by_filter_count += 1
+            if debug_log:
+                debug_log.write(f"[SKIPPED_SUBJECT_FILTER] {_safe_log_text(subject)}\n")
             continue
 
         matched_subject_count += 1
@@ -991,12 +1011,6 @@ def read_messages_from_outlook(
                     f"{_safe_log_text(subject)}\n"
                 )
             break
-
-        if filter_text and filter_text not in subject.lower():
-            skipped_by_filter_count += 1
-            if debug_log:
-                debug_log.write(f"[SKIPPED_SUBJECT_FILTER] {_safe_log_text(subject)}\n")
-            continue
 
         if debug_log:
             debug_log.write(
@@ -1878,9 +1892,20 @@ class DashboardUI:
             is_alert = counts.start_count != 1 or counts.stop_count != 1
             status = "ALERT" if is_alert else "OK"
             # Show breakdown only if there are multiple raw notifications
-            start_text = str(counts.start_count) if counts.raw_start_count == 1 else f"{counts.start_count}({counts.raw_start_count})"
-            stop_text = str(counts.stop_count) if counts.raw_stop_count == 1 else f"{counts.stop_count}({counts.raw_stop_count})"
-            row_text = f"{date_key} | Start: {start_text} | Stop: {stop_text} | {status}"
+            start_text = (
+                str(counts.start_count)
+                if counts.raw_start_count <= 1
+                else f"{counts.start_count}({counts.raw_start_count})"
+            )
+            stop_text = (
+                str(counts.stop_count)
+                if counts.raw_stop_count <= 1
+                else f"{counts.stop_count}({counts.raw_stop_count})"
+            )
+            # Include timestamps if available
+            start_time_str = counts.start_time.strftime("%H:%M:%S") if counts.start_time else "N/A"
+            stop_time_str = counts.stop_time.strftime("%H:%M:%S") if counts.stop_time else "N/A"
+            row_text = f"{date_key} | Start: {start_text} @ {start_time_str} | Stop: {stop_text} @ {stop_time_str} | {status}"
             self.daily_listbox.insert(tk.END, row_text)
             row_index = self.daily_listbox.size() - 1
             if is_alert:
