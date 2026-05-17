@@ -1,15 +1,111 @@
+import glob
+import hashlib
+import importlib.util
+import logging
+import os
 import re
+import subprocess
+import sys
+import threading
+import time
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-import importlib.util
-import os
-import subprocess
-import sys
-import time
 from tkinter import filedialog, messagebox
 from typing import Iterable, Optional
-import threading
+
+
+# Logging setup with rotation and retention
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(APP_DIR, "logs")
+LOG_BASENAME = "outlook_qa_dashboard_debug"
+LOG_EXT = ".log"
+LOG_MAX_SIZE = 1 * 1024 * 1024  # 1 MB
+LOG_RETENTION_DAYS = 7
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+SAFE_MODE = _env_flag("OUTLOOK_QA_SAFE_MODE", True)
+
+
+def _current_log_path() -> str:
+    return os.path.join(LOG_DIR, f"{LOG_BASENAME}{LOG_EXT}")
+
+
+def _redact_subject(subject: str) -> str:
+    digest = hashlib.sha256(subject.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return f"subject_sha256={digest} len={len(subject)}"
+
+
+def _append_debug_log_line(line: str) -> None:
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        log_path = _current_log_path()
+        rotate_log_if_needed(log_path)
+        delete_old_logs()
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            log_file.write(line + "\n")
+    except OSError:
+        pass
+
+
+def _user_error_message(default_message: str, exc: Optional[Exception] = None) -> str:
+    if SAFE_MODE or exc is None:
+        return default_message
+    return f"{default_message}\n\n{exc}"
+
+def rotate_log_if_needed(log_path):
+    """
+    If the log file exceeds LOG_MAX_SIZE, rotate it by renaming with a timestamp.
+    """
+    if os.path.exists(log_path) and os.path.getsize(log_path) > LOG_MAX_SIZE:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        rotated_name = f"{LOG_BASENAME}_{timestamp}{LOG_EXT}"
+        rotated_path = os.path.join(LOG_DIR, rotated_name)
+        os.rename(log_path, rotated_path)
+
+def delete_old_logs():
+    """
+    Delete log files older than LOG_RETENTION_DAYS.
+    """
+    now = time.time()
+    os.makedirs(LOG_DIR, exist_ok=True)
+    pattern = os.path.join(LOG_DIR, f"{LOG_BASENAME}_*{LOG_EXT}")
+    for log_file in glob.glob(pattern):
+        try:
+            mtime = os.path.getmtime(log_file)
+            if (now - mtime) > LOG_RETENTION_DAYS * 86400:
+                os.remove(log_file)
+        except OSError:
+            pass
+    # Also check the main log file
+    main_log = _current_log_path()
+    if os.path.exists(main_log):
+        mtime = os.path.getmtime(main_log)
+        if (now - mtime) > LOG_RETENTION_DAYS * 86400:
+            try:
+                os.remove(main_log)
+            except OSError:
+                pass
+
+def setup_logging():
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_path = _current_log_path()
+    rotate_log_if_needed(log_path)
+    delete_old_logs()
+    logging.basicConfig(
+        filename=log_path,
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s"
+    )
+
+setup_logging()
 
 
 START_RE = re.compile(r"\bstart(?:ed)?\b", re.IGNORECASE)
@@ -85,8 +181,137 @@ def _ensure_runtime_dependencies() -> None:
     if not missing_packages:
         return
 
-    install_cmd = [sys.executable, "-m", "pip", "install", *missing_packages]
-    subprocess.check_call(install_cmd)
+    package_list = ", ".join(missing_packages)
+    raise RuntimeError(
+        "Missing required Python packages: "
+        f"{package_list}. Install them before running: "
+        f"{sys.executable} -m pip install {' '.join(missing_packages)}"
+    )
+
+
+def _find_outlook_executable() -> Optional[str]:
+    try:
+        import winreg
+    except ImportError:
+        return None
+
+    app_path_keys = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\OUTLOOK.EXE"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\OUTLOOK.EXE"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\OUTLOOK.EXE"),
+    ]
+
+    for root, key_path in app_path_keys:
+        try:
+            with winreg.OpenKey(root, key_path) as key:
+                value, _ = winreg.QueryValueEx(key, None)
+                if value and os.path.isfile(value):
+                    return value
+        except OSError:
+            continue
+
+    candidate_paths = [
+        os.path.join(os.environ.get("ProgramFiles", ""), "Microsoft Office", "root", "Office16", "OUTLOOK.EXE"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Microsoft Office", "root", "Office16", "OUTLOOK.EXE"),
+    ]
+    for path in candidate_paths:
+        if path and os.path.isfile(path):
+            return path
+
+    return None
+
+
+def _is_suspicious_executable_path(exe_path: str) -> bool:
+    normalized = os.path.normcase(os.path.abspath(exe_path))
+    basename = os.path.basename(normalized).lower()
+    if basename != "outlook.exe":
+        return True
+
+    temp_roots = [
+        os.environ.get("TEMP", ""),
+        os.environ.get("TMP", ""),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Temp"),
+    ]
+    for root in temp_roots:
+        if root:
+            root_norm = os.path.normcase(os.path.abspath(root))
+            if normalized.startswith(root_norm + os.sep):
+                return True
+
+    return False
+
+
+def _get_powershell_executable() -> Optional[str]:
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    candidates = [
+        os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+        os.path.join(system_root, "Sysnative", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _is_trusted_outlook_executable(exe_path: str) -> bool:
+    """
+    Best-effort signature check for Outlook executable.
+    Returns False only on explicit trust failures; returns True if verification
+    cannot be performed to avoid over-restricting normal environments.
+    """
+    escaped_path = exe_path.replace("'", "''")
+    ps_command = (
+        f"$sig = Get-AuthenticodeSignature -FilePath '{escaped_path}'; "
+        "Write-Output ($sig.Status.ToString()); "
+        "if ($sig.SignerCertificate) { Write-Output ($sig.SignerCertificate.Subject) }"
+    )
+
+    powershell_exe = _get_powershell_executable()
+    if not powershell_exe:
+        return True
+
+    try:
+        result = subprocess.run(
+            [
+                powershell_exe,
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                ps_command,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+    if result.returncode != 0:
+        return True
+
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        return True
+
+    status = lines[0].upper()
+    signer_subject = lines[1].upper() if len(lines) > 1 else ""
+
+    explicit_fail_statuses = {
+        "NOTSIGNED",
+        "NOTTRUSTED",
+        "HASHMISMATCH",
+        "REVOKED",
+        "EXPIRED",
+        "UNKNOWNERROR",
+    }
+    if status in explicit_fail_statuses:
+        return False
+
+    if status == "VALID" and "MICROSOFT" not in signer_subject:
+        return False
+
+    return True
 
 
 def _get_outlook_namespace():
@@ -103,7 +328,14 @@ def _get_outlook_namespace():
 
     # If Outlook is installed but not running, try launching it first.
     try:
-        os.startfile("outlook.exe")
+        outlook_exe = _find_outlook_executable()
+        if not outlook_exe:
+            raise OSError("Outlook executable not found")
+        if SAFE_MODE and _is_suspicious_executable_path(outlook_exe):
+            raise OSError("Potentially unsafe Outlook executable path")
+        if SAFE_MODE and not _is_trusted_outlook_executable(outlook_exe):
+            raise OSError("Outlook executable failed trust validation")
+        os.startfile(outlook_exe)
     except OSError as launch_exc:
         raise OutlookNotFoundError("Outlook not found.") from launch_exc
 
@@ -314,9 +546,16 @@ def _apply_message_to_stats(
     is_notification_type = _is_notification(subject_text)
     is_pentest = "[PENTEST]" in subject_text.upper()
 
-    # DEBUG: Log every subject processed and what is detected
+    # DEBUG: Log parser signal details and keep subjects redacted by default.
     if hasattr(stats, '_log_debug'):
-        stats._log_debug(f"Processing subject: {subject_text} | is_pentest={is_pentest} is_bracket_start={is_bracket_start} is_bracket_stop={is_bracket_stop} is_start={is_start} is_stop={is_stop} is_notification_type={is_notification_type}")
+        stats._log_debug(
+            f"Processing subject: {_redact_subject(subject_text)} | "
+            f"is_pentest={is_pentest} "
+            f"is_bracket_start={is_bracket_start} "
+            f"is_bracket_stop={is_bracket_stop} "
+            f"is_start={is_start} is_stop={is_stop} "
+            f"is_notification_type={is_notification_type}"
+        )
 
     # Only count if [PENTEST] is present in subject
     if is_pentest and (is_bracket_start or (is_notification_type and is_start)):
@@ -351,7 +590,11 @@ def parse_stats_from_messages(messages: Iterable[tuple[str, object]]) -> Dashboa
     return stats
 
 
-def parse_stats_by_aaid_from_messages(messages: Iterable[tuple[str, object]], filter_aaid: Optional[set[str]] = None) -> dict[str, DashboardStats]:
+def parse_stats_by_aaid_from_messages(
+    messages: Iterable[tuple[str, object]],
+    filter_aaid: Optional[set[str]] = None,
+    debug_enabled: bool = False,
+) -> dict[str, DashboardStats]:
     message_list = list(messages)
     stats_by_aaid: dict[str, DashboardStats] = {}
     
@@ -368,15 +611,11 @@ def parse_stats_by_aaid_from_messages(messages: Iterable[tuple[str, object]], fi
 
         event_time = _to_datetime(received_time)
         aaid = extract_aaid(subject)
-        # DEBUG: Log extracted AAID and subject
-        try:
-            with open("outlook_qa_dashboard_debug.log", "a", encoding="utf-8") as log_file:
-                log_file.write(
-                    f"[PARSE] Subject: {_safe_log_text(subject)} | "
-                    f"Extracted AAID: {_safe_log_text(aaid)}\n"
-                )
-        except Exception:
-            pass
+        # DEBUG: Keep logs non-sensitive while still signaling parse activity.
+        if debug_enabled:
+            _append_debug_log_line(
+                f"[{datetime.now().isoformat()}] [PARSE] { _redact_subject(subject) }"
+            )
         # Filter by AAID if specified
         if filter_aaid is not None and aaid not in filter_aaid:
             continue
@@ -977,6 +1216,7 @@ def _read_messages_from_folder(
     subject_contains: str,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    debug_enabled: bool = False,
 ) -> list[tuple[str, object, Optional[str], str]]:
     folder = get_outlook_folder(namespace, folder_path)
 
@@ -991,23 +1231,11 @@ def _read_messages_from_folder(
     count = 0
 
 
-    # DEBUG: Log every subject fetched from Outlook
-    try:
-        debug_log = open("outlook_qa_dashboard_debug.log", "a", encoding="utf-8")
-        if keywords:
-            debug_log.write(f"[FILTER] Subject contains keywords (any match): {keywords}\n")
-        else:
-            debug_log.write(f"[FILTER] No subject filter applied\n")
-        debug_log.write(
-            "[FILTER] Strict mode: only subjects containing '[PENTEST]', "
-            "'Tech QA' / 'techqa', or 'Final QA' / 'finalqa' will be read.\n"
+    if debug_enabled:
+        _append_debug_log_line(
+            f"[{datetime.now().isoformat()}] [FILTER] "
+            f"keywords_count={len(keywords)} date_range={normalized_start}->{normalized_end}"
         )
-        if normalized_start or normalized_end:
-            debug_log.write(
-                f"[FILTER] Date range: {normalized_start} -> {normalized_end}\n"
-            )
-    except Exception:
-        debug_log = None
 
     # Strict subject match: read [PENTEST] thread emails plus any TechQA / Final QA
     # related messages (these keywords drive the dashboard's QA milestones).
@@ -1035,42 +1263,20 @@ def _read_messages_from_folder(
         # If custom keywords provided, also require matching (AND condition)
         if keywords and not any(kw in subject.lower() for kw in keywords):
             skipped_by_filter_count += 1
-            if debug_log:
-                debug_log.write(f"[SKIPPED_SUBJECT_FILTER] {_safe_log_text(subject)}\n")
             continue
 
         matched_subject_count += 1
 
         received_time = _to_datetime(getattr(item, "ReceivedTime", None))
         normalized_received = _normalize_for_comparison(received_time)
-        if debug_log:
-            debug_log.write(
-                f"[TIME_CHECK] raw={_safe_log_text(getattr(item, 'ReceivedTime', None))} | "
-                f"parsed={_safe_log_text(received_time)}\n"
-            )
 
         if normalized_end and normalized_received and normalized_received > normalized_end:
             skipped_by_date_count += 1
-            if debug_log:
-                debug_log.write(
-                    f"[SKIPPED_NEWER_THAN_END] {_safe_log_text(normalized_received)} | "
-                    f"{_safe_log_text(subject)}\n"
-                )
             continue
         if normalized_start and normalized_received and normalized_received < normalized_start:
             # Items are sorted by newest first, so we can stop once we pass lower bound.
             skipped_by_date_count += 1
-            if debug_log:
-                debug_log.write(
-                    f"[SKIPPED_OLDER_THAN_START] {_safe_log_text(normalized_received)} | "
-                    f"{_safe_log_text(subject)}\n"
-                )
             break
-
-        if debug_log:
-            debug_log.write(
-                f"[FETCHED] {_safe_log_text(normalized_received)} | {_safe_log_text(subject)}\n"
-            )
 
         results.append(
             (
@@ -1084,14 +1290,12 @@ def _read_messages_from_folder(
         if count >= max_emails:
             break
 
-    if debug_log:
-        debug_log.write(
-            f"[SUMMARY] PENTEST subjects matched: {matched_subject_count} | "
-            f"excluded by date: {skipped_by_date_count} | "
-            f"excluded by subject filter: {skipped_by_filter_count} | "
-            f"kept: {len(results)}\n"
+    if debug_enabled:
+        _append_debug_log_line(
+            f"[{datetime.now().isoformat()}] [SUMMARY] "
+            f"matched={matched_subject_count} skipped_date={skipped_by_date_count} "
+            f"skipped_filter={skipped_by_filter_count} kept={len(results)}"
         )
-        debug_log.close()
 
     return results
 
@@ -1102,6 +1306,7 @@ def read_messages_from_outlook(
     subject_contains: str,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    debug_enabled: bool = False,
 ) -> list[tuple[str, object, Optional[str], str]]:
     namespace = _get_outlook_namespace()
     return _read_messages_from_folder(
@@ -1111,6 +1316,7 @@ def read_messages_from_outlook(
         subject_contains=subject_contains,
         start_date=start_date,
         end_date=end_date,
+        debug_enabled=debug_enabled,
     )
 
 
@@ -1121,6 +1327,7 @@ def read_messages_from_all_mailboxes(
     subject_contains: str,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+    debug_enabled: bool = False,
 ) -> list[tuple[str, object, Optional[str], str]]:
     namespace = _get_outlook_namespace()
     aggregated: list[tuple[str, object, Optional[str], str]] = []
@@ -1154,6 +1361,7 @@ def read_messages_from_all_mailboxes(
                     subject_contains=subject_contains,
                     start_date=start_date,
                     end_date=end_date,
+                    debug_enabled=debug_enabled,
                 )
             )
         except OutlookFolderNotFoundError:
@@ -1291,11 +1499,9 @@ class DashboardUI:
     def _log_debug(self, message: str) -> None:
         if not self.debug_enabled.get():
             return
-        try:
-            with open("outlook_qa_dashboard_debug.log", "a", encoding="utf-8") as log_file:
-                log_file.write(f"[{datetime.now().isoformat()}] {_safe_log_text(message, max_len=2000)}\n")
-        except Exception:
-            pass
+        _append_debug_log_line(
+            f"[{datetime.now().isoformat()}] {_safe_log_text(message, max_len=2000)}"
+        )
 
     def _init_mailboxes_async(self) -> None:
         if self._mailbox_init_in_progress:
@@ -2092,7 +2298,10 @@ class DashboardUI:
             export_stats_to_excel(self.stats_by_aaid, file_path)
             messagebox.showinfo("Export Complete", f"Exported results to:\n{file_path}")
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Export Error", str(exc))
+            messagebox.showerror(
+                "Export Error",
+                _user_error_message("Failed to export results.", exc),
+            )
 
     def refresh(self):
         # Initialize mailboxes asynchronously so the UI thread does not block.
@@ -2153,6 +2362,8 @@ class DashboardUI:
                 return
 
             try:
+                debug_enabled = self.debug_enabled.get()
+                logging.getLogger().setLevel(logging.DEBUG if debug_enabled else logging.INFO)
                 selected_mailbox = self.selected_mailbox.get().strip()
                 if selected_mailbox == ALL_MAILBOXES_OPTION:
                     messages = read_messages_from_all_mailboxes(
@@ -2162,6 +2373,7 @@ class DashboardUI:
                         subject_contains=subject_contains,
                         start_date=start_date,
                         end_date=end_date,
+                        debug_enabled=debug_enabled,
                     )
                 else:
                     folder_path = self._get_full_folder_path()
@@ -2171,12 +2383,17 @@ class DashboardUI:
                         subject_contains=subject_contains,
                         start_date=start_date,
                         end_date=end_date,
+                        debug_enabled=debug_enabled,
                     )
                 self._log_debug(f"Total messages fetched: {len(messages)}")
                 for msg in messages:
                     subject = msg[0] if msg else ""
-                    self._log_debug(f"[MESSAGE_TO_PARSE] {subject}")
-                stats_by_aaid = parse_stats_by_aaid_from_messages(messages, filter_aaid=filter_aaid)
+                    self._log_debug(f"[MESSAGE_TO_PARSE] {_redact_subject(str(subject))}")
+                stats_by_aaid = parse_stats_by_aaid_from_messages(
+                    messages,
+                    filter_aaid=filter_aaid,
+                    debug_enabled=debug_enabled,
+                )
                 daily_counts_by_aaid = parse_daily_notification_counts_by_aaid(messages, filter_aaid=filter_aaid)
                 trend_stats = compute_missing_notification_trends(messages, filter_aaid=filter_aaid)
             except OutlookNotFoundError:
@@ -2185,7 +2402,13 @@ class DashboardUI:
                 return
             except Exception as exc:
                 self.root.after(0, lambda: self.status_var.set(""))
-                self.root.after(0, lambda: messagebox.showerror("Outlook Read Error", str(exc)))
+                self.root.after(
+                    0,
+                    lambda: messagebox.showerror(
+                        "Outlook Read Error",
+                        _user_error_message("Failed to read Outlook data.", exc),
+                    ),
+                )
                 import traceback
 
                 self._log_debug(f"Outlook Read Error: {exc}\n{traceback.format_exc()}")
@@ -2218,7 +2441,13 @@ class DashboardUI:
             self.root.after(0, update_ui)
         except Exception as exc:
             self.root.after(0, lambda: self.status_var.set(""))
-            self.root.after(0, lambda: messagebox.showerror("Thread Error", str(exc)))
+            self.root.after(
+                0,
+                lambda: messagebox.showerror(
+                    "Thread Error",
+                    _user_error_message("An unexpected error occurred while processing."),
+                ),
+            )
             self._log_debug(f"Thread Error: {exc}")
 
     def _get_full_folder_path(self):
@@ -2247,7 +2476,7 @@ def main():
             root.withdraw()
             messagebox.showerror(
                 "Dependency Error",
-                f"Failed to install required Python packages.\n\n{dependency_exc}",
+                _user_error_message("Required Python packages are missing.", dependency_exc),
             )
             root.destroy()
             return
@@ -2257,13 +2486,18 @@ def main():
         app.refresh()
         root.mainloop()
     except Exception as exc:
-        import traceback
-        error_message = f"[FATAL ERROR] {exc}\n{traceback.format_exc()}"
+        if SAFE_MODE:
+            error_message = "[FATAL ERROR] Application terminated unexpectedly."
+        else:
+            import traceback
+            error_message = f"[FATAL ERROR] {exc}\n{traceback.format_exc()}"
         print(error_message)
         try:
-            with open("outlook_qa_dashboard_debug.log", "a", encoding="utf-8") as log_file:
+            log_path = _current_log_path()
+            rotate_log_if_needed(log_path)
+            with open(log_path, "a", encoding="utf-8") as log_file:
                 log_file.write(error_message + "\n")
-        except Exception:
+        except OSError:
             pass
 
 
