@@ -295,6 +295,8 @@ def parse_stats_by_aaid_from_messages(messages: Iterable[tuple[str, object]], fi
     
     # Track all start notifications by AAID to capture sender of earliest one
     start_notifications_by_aaid: dict[str, list[tuple[Optional[datetime], Optional[str]]]] = {}
+    unique_start_sender_day_by_aaid: dict[str, set[tuple[str, str]]] = {}
+    unique_stop_sender_day_by_aaid: dict[str, set[tuple[str, str]]] = {}
 
     # First pass: collect stats and track start notifications
     for msg in message_list:
@@ -327,14 +329,35 @@ def parse_stats_by_aaid_from_messages(messages: Iterable[tuple[str, object]], fi
         )
 
         # Track start notifications
+        lowered = subject.lower()
+        if "automatic reply" in lowered or "autoreply" in lowered or "auto-reply" in lowered:
+            continue
+
         is_start = _is_start(subject)
+        is_stop = _is_stop(subject)
         is_bracket_start = "[START]" in subject.upper()
+        is_bracket_stop = "[STOP]" in subject.upper()
         is_notification_type = _is_notification(subject)
+        is_pentest = "[PENTEST]" in subject.upper()
+
+        if event_time is not None and is_pentest:
+            date_key = event_time.strftime("%Y-%m-%d")
+            sender_key = _sender_dedupe_key(sender_name)
+            if is_bracket_start or (is_notification_type and is_start):
+                start_unique = unique_start_sender_day_by_aaid.setdefault(aaid, set())
+                start_unique.add((date_key, sender_key))
+            if is_bracket_stop or (is_notification_type and is_stop):
+                stop_unique = unique_stop_sender_day_by_aaid.setdefault(aaid, set())
+                stop_unique.add((date_key, sender_key))
 
         if is_bracket_start or (is_notification_type and is_start):
             if aaid not in start_notifications_by_aaid:
                 start_notifications_by_aaid[aaid] = []
             start_notifications_by_aaid[aaid].append((event_time, sender_name))
+
+    for aaid, stats in stats_by_aaid.items():
+        stats.start_notifications_count = len(unique_start_sender_day_by_aaid.get(aaid, set()))
+        stats.stop_notifications_count = len(unique_stop_sender_day_by_aaid.get(aaid, set()))
     
     # Second pass: set sender for earliest start notification
     for aaid, start_notifications in start_notifications_by_aaid.items():
@@ -445,10 +468,6 @@ def parse_stats_by_aaid_from_messages(messages: Iterable[tuple[str, object]], fi
                 stats.first_start_notification_at.date(),
                 stats.last_stop_notification_at.date(),
             )
-        
-        # Flag if this is a minimal test run (1 START + 1 STOP only)
-        if stats.start_notifications_count == 1 and stats.stop_notifications_count == 1:
-            stats.is_test_run = True
         
         # Flag if TechQA started during or before testing was completed
         if stats.techqa_milestone_at and stats.last_stop_notification_at:
@@ -1074,7 +1093,7 @@ class DashboardUI:
         self.folder_path = tk.StringVar(value="Inbox")
         self.max_emails = tk.StringVar(value="100")
         self.subject_contains = tk.StringVar(value="")
-        self.range_option = tk.StringVar(value="Last 1 Week")
+        self.range_option = tk.StringVar(value="Last 3 Months")
         self.custom_start_date = tk.StringVar(value="")
         self.custom_end_date = tk.StringVar(value="")
         self.aaid_filter = tk.StringVar(value="")
@@ -1837,12 +1856,10 @@ class DashboardUI:
     def _load_daily_counts_for_aaid(self, aaid: str) -> None:
         self.daily_listbox.delete(0, tk.END)
         
-        # Show test run and techqa overlap flags at the top
+        # Show techqa overlap flags at the top
         stats = self.stats_by_aaid.get(aaid)
         if stats:
             flags = []
-            if stats.is_test_run:
-                flags.append("[TEST RUN]")
             if stats.has_techqa_overlap:
                 flags.append("[TechQA Overlap]")
             if flags:
@@ -1860,12 +1877,9 @@ class DashboardUI:
             # Daily notifications are valid only when there is exactly 1 start and 1 stop.
             is_alert = counts.start_count != 1 or counts.stop_count != 1
             status = "ALERT" if is_alert else "OK"
-            start_text = str(counts.start_count)
-            stop_text = str(counts.stop_count)
-            if counts.raw_start_count > counts.start_count:
-                start_text = f"{counts.start_count} [{counts.raw_start_count}]"
-            if counts.raw_stop_count > counts.stop_count:
-                stop_text = f"{counts.stop_count} [{counts.raw_stop_count}]"
+            # Show breakdown only if there are multiple raw notifications
+            start_text = str(counts.start_count) if counts.raw_start_count == 1 else f"{counts.start_count}({counts.raw_start_count})"
+            stop_text = str(counts.stop_count) if counts.raw_stop_count == 1 else f"{counts.stop_count}({counts.raw_stop_count})"
             row_text = f"{date_key} | Start: {start_text} | Stop: {stop_text} | {status}"
             self.daily_listbox.insert(tk.END, row_text)
             row_index = self.daily_listbox.size() - 1
