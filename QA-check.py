@@ -1265,6 +1265,7 @@ class DashboardUI:
             def update_success_ui() -> None:
                 self.mailbox_names = mailbox_names if mailbox_names else ["Default Mailbox"]
                 self.selected_mailbox.set(self.mailbox_names[0])
+                self._refresh_mailbox_dropdown()
                 self._mailbox_init_in_progress = False
                 self.status_var.set("Ready.")
 
@@ -1273,6 +1274,7 @@ class DashboardUI:
             def update_not_found_ui() -> None:
                 self.mailbox_names = ["Default Mailbox"]
                 self.selected_mailbox.set("Default Mailbox")
+                self._refresh_mailbox_dropdown()
                 self._mailbox_init_in_progress = False
                 self.status_var.set("")
                 messagebox.showerror("Outlook Not Found", "Outlook not found.")
@@ -1282,6 +1284,7 @@ class DashboardUI:
             def update_fallback_ui() -> None:
                 self.mailbox_names = ["Default Mailbox"]
                 self.selected_mailbox.set("Default Mailbox")
+                self._refresh_mailbox_dropdown()
                 self._mailbox_init_in_progress = False
                 self.status_var.set("Ready.")
 
@@ -1370,8 +1373,8 @@ class DashboardUI:
         mailbox_row.grid(row=0, column=1, columnspan=2, sticky="w", pady=(2, 2))
         # Ensure OptionMenu always has at least one value to avoid init error
         mailbox_options = self.mailbox_names if self.mailbox_names else ["Default Mailbox"]
-        mailbox_menu = tk.OptionMenu(mailbox_row, self.selected_mailbox, *mailbox_options)
-        mailbox_menu.pack(side="left")
+        self.mailbox_menu = tk.OptionMenu(mailbox_row, self.selected_mailbox, *mailbox_options)
+        self.mailbox_menu.pack(side="left")
         tk.Checkbutton(mailbox_row, text="Enable Debug Logs", variable=self.debug_enabled).pack(
             side="left", padx=(10, 0)
         )
@@ -1525,6 +1528,15 @@ class DashboardUI:
         frame.grid_columnconfigure(2, weight=0)
         frame.grid_columnconfigure(3, weight=0)
         frame.grid_columnconfigure(4, weight=1)
+
+    def _refresh_mailbox_dropdown(self) -> None:
+        if not hasattr(self, "mailbox_menu"):
+            return
+        menu = self.mailbox_menu["menu"]
+        menu.delete(0, "end")
+        options = self.mailbox_names if self.mailbox_names else ["Default Mailbox"]
+        for name in options:
+            menu.add_command(label=name, command=tk._setit(self.selected_mailbox, name))
 
     def _build_statistics_panel(self, parent: tk.LabelFrame) -> None:
         parent.grid_columnconfigure(0, weight=1)
