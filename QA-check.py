@@ -2,10 +2,14 @@ import re
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+import importlib.util
+import os
+import subprocess
+import sys
+import time
 from tkinter import filedialog, messagebox
 from typing import Iterable, Optional
 import threading
-import pythoncom
 
 
 START_RE = re.compile(r"\bstart(?:ed)?\b", re.IGNORECASE)
@@ -22,6 +26,10 @@ AAID_PATTERNS = [
 ]
 EXCEL_FORMULA_PREFIXES = ("=", "+", "-", "@")
 MAX_EMAILS_LIMIT = 5000
+RUNTIME_DEPENDENCIES: list[tuple[str, str]] = [
+    ("pywin32", "win32com"),
+    ("openpyxl", "openpyxl"),
+]
 
 
 @dataclass
@@ -57,6 +65,57 @@ class DailyNotificationCounts:
 
 class OutlookFolderNotFoundError(Exception):
     pass
+
+
+class OutlookNotFoundError(Exception):
+    pass
+
+
+def _is_module_available(module_name: str) -> bool:
+    return importlib.util.find_spec(module_name) is not None
+
+
+def _ensure_runtime_dependencies() -> None:
+    missing_packages = [
+        package_name
+        for package_name, module_name in RUNTIME_DEPENDENCIES
+        if not _is_module_available(module_name)
+    ]
+    if not missing_packages:
+        return
+
+    install_cmd = [sys.executable, "-m", "pip", "install", *missing_packages]
+    subprocess.check_call(install_cmd)
+
+
+def _get_outlook_namespace():
+    import win32com.client  # Local import so tests can run without Outlook dependency.
+    import pythoncom
+
+    pythoncom.CoInitialize()
+
+    try:
+        outlook = win32com.client.Dispatch("Outlook.Application")
+        return outlook.GetNamespace("MAPI")
+    except Exception as initial_exc:
+        last_exc = initial_exc
+
+    # If Outlook is installed but not running, try launching it first.
+    try:
+        os.startfile("outlook.exe")
+    except OSError as launch_exc:
+        raise OutlookNotFoundError("Outlook not found.") from launch_exc
+
+    # Give Outlook a few seconds to initialize COM and MAPI.
+    for _ in range(8):
+        try:
+            outlook = win32com.client.Dispatch("Outlook.Application")
+            return outlook.GetNamespace("MAPI")
+        except Exception as retry_exc:
+            last_exc = retry_exc
+            time.sleep(1)
+
+    raise OutlookNotFoundError("Outlook not found.") from last_exc
 
 
 def extract_aaid(subject: str) -> str:
@@ -917,12 +976,7 @@ def read_messages_from_outlook(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
 ) -> list[tuple[str, object, Optional[str], str]]:
-    import win32com.client  # Local import so tests can run without Outlook dependency.
-    import pythoncom
-    pythoncom.CoInitialize()
-
-    outlook = win32com.client.Dispatch("Outlook.Application")
-    namespace = outlook.GetNamespace("MAPI")
+    namespace = _get_outlook_namespace()
     folder = get_outlook_folder(namespace, folder_path)
 
     items = folder.Items
@@ -1139,6 +1193,7 @@ class DashboardUI:
         self.aaid_total_pages = 0
         self.aaid_page_info = tk.StringVar(value="Total: 0 | Page: 0/0")
         self.aaid_sort_mode = "start_desc"
+        self._mailbox_init_in_progress = False
 
         self.status_var = tk.StringVar(value="Ready.")
         self.status_label = tk.Label(self.root, textvariable=self.status_var, anchor="w", fg="blue")
@@ -1160,8 +1215,8 @@ class DashboardUI:
         self._graph_figure = None
         self._graph_resize_after_id: Optional[str] = None
 
-        self._init_mailboxes()
         self._build()
+        self.root.after(50, self._init_mailboxes_async)
         self._auto_adjust_max_emails()
         self._update_stat_date_range_preview()
 
@@ -1174,13 +1229,17 @@ class DashboardUI:
         except Exception:
             pass
 
-    def _init_mailboxes(self):
+    def _init_mailboxes_async(self) -> None:
+        if self._mailbox_init_in_progress:
+            return
+        self._mailbox_init_in_progress = True
+        self.status_var.set("Initializing Outlook mailboxes...")
+        thread = threading.Thread(target=self._init_mailboxes_worker, daemon=True)
+        thread.start()
+
+    def _init_mailboxes_worker(self) -> None:
         try:
-            import win32com.client
-            import pythoncom
-            pythoncom.CoInitialize()
-            outlook = win32com.client.Dispatch("Outlook.Application")
-            namespace = outlook.GetNamespace("MAPI")
+            namespace = _get_outlook_namespace()
             mailbox_names = []
             def is_mail_folder(folder):
                 try:
@@ -1202,11 +1261,31 @@ class DashboardUI:
                 mailbox_names.append(name)
             # Remove duplicates and sort
             mailbox_names = sorted(set(mailbox_names))
-            self.mailbox_names = mailbox_names if mailbox_names else ["Default Mailbox"]
-            self.selected_mailbox.set(self.mailbox_names[0])
+
+            def update_success_ui() -> None:
+                self.mailbox_names = mailbox_names if mailbox_names else ["Default Mailbox"]
+                self.selected_mailbox.set(self.mailbox_names[0])
+                self._mailbox_init_in_progress = False
+                self.status_var.set("Ready.")
+
+            self.root.after(0, update_success_ui)
+        except OutlookNotFoundError:
+            def update_not_found_ui() -> None:
+                self.mailbox_names = ["Default Mailbox"]
+                self.selected_mailbox.set("Default Mailbox")
+                self._mailbox_init_in_progress = False
+                self.status_var.set("")
+                messagebox.showerror("Outlook Not Found", "Outlook not found.")
+
+            self.root.after(0, update_not_found_ui)
         except Exception:
-            self.mailbox_names = ["Default Mailbox"]
-            self.selected_mailbox.set("Default Mailbox")
+            def update_fallback_ui() -> None:
+                self.mailbox_names = ["Default Mailbox"]
+                self.selected_mailbox.set("Default Mailbox")
+                self._mailbox_init_in_progress = False
+                self.status_var.set("Ready.")
+
+            self.root.after(0, update_fallback_ui)
 
     def _toggle_custom_dates(self):
         if self.range_option.get() == "Custom Range":
@@ -1933,11 +2012,9 @@ class DashboardUI:
             messagebox.showerror("Export Error", str(exc))
 
     def refresh(self):
-        # Initialize mailboxes only if not already loaded (or always, if you want to refresh list)
+        # Initialize mailboxes asynchronously so the UI thread does not block.
         if not self.mailbox_names or self.mailbox_names == ["Default Mailbox"]:
-            self._init_mailboxes()
-            # If only initializing mailboxes, do not start refresh thread
-            self.status_var.set("Ready.")
+            self._init_mailboxes_async()
             return
         self.status_var.set("Loading emails and parsing...")
         self.root.after(100, self._start_refresh_thread)
@@ -2008,6 +2085,10 @@ class DashboardUI:
                 stats_by_aaid = parse_stats_by_aaid_from_messages(messages, filter_aaid=filter_aaid)
                 daily_counts_by_aaid = parse_daily_notification_counts_by_aaid(messages, filter_aaid=filter_aaid)
                 trend_stats = compute_missing_notification_trends(messages, filter_aaid=filter_aaid)
+            except OutlookNotFoundError:
+                self.root.after(0, lambda: self.status_var.set(""))
+                self.root.after(0, lambda: messagebox.showerror("Outlook Not Found", "Outlook not found."))
+                return
             except Exception as exc:
                 self.root.after(0, lambda: self.status_var.set(""))
                 self.root.after(0, lambda: messagebox.showerror("Outlook Read Error", str(exc)))
@@ -2061,6 +2142,18 @@ class DashboardUI:
 
 def main():
     try:
+        try:
+            _ensure_runtime_dependencies()
+        except Exception as dependency_exc:  # noqa: BLE001
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror(
+                "Dependency Error",
+                f"Failed to install required Python packages.\n\n{dependency_exc}",
+            )
+            root.destroy()
+            return
+
         root = tk.Tk()
         app = DashboardUI(root)
         app.refresh()
