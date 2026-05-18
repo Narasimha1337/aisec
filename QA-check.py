@@ -602,7 +602,6 @@ def parse_stats_by_aaid_from_messages(
     start_notifications_by_aaid: dict[str, list[tuple[Optional[datetime], Optional[str]]]] = {}
     unique_start_sender_day_by_aaid: dict[str, set[tuple[str, str]]] = {}
     unique_stop_sender_day_by_aaid: dict[str, set[tuple[str, str]]] = {}
-    qa_sender_fallback_by_aaid: dict[str, str] = {}
 
     # First pass: collect stats and track start notifications
     for msg in message_list:
@@ -706,14 +705,6 @@ def parse_stats_by_aaid_from_messages(
         tester_name = stats.first_start_notification_sender
 
         if (
-            tester_name is None
-            and sender_name is not None
-            and (_is_techqa(subject) or _is_finalqa(subject))
-            and aaid not in qa_sender_fallback_by_aaid
-        ):
-            qa_sender_fallback_by_aaid[aaid] = sender_name
-
-        if (
             _is_techqa(subject)
             and stats.techqa_milestone_at is None
             and tester_name is not None
@@ -783,13 +774,6 @@ def parse_stats_by_aaid_from_messages(
         if stats.techqa_milestone_at and stats.last_stop_notification_at:
             if stats.techqa_milestone_at <= stats.last_stop_notification_at:
                 stats.has_techqa_overlap = True
-
-    # For QA-only AAIDs without START notifications, infer tester name from the
-    # earliest QA-related sender so details panel doesn't stay N/A.
-    for aaid, sender_name in qa_sender_fallback_by_aaid.items():
-        stats = stats_by_aaid.get(aaid)
-        if stats is not None and stats.first_start_notification_sender is None:
-            stats.first_start_notification_sender = sender_name
 
     return stats_by_aaid
 
@@ -989,10 +973,13 @@ def compute_aggregate_statistics(stats_by_aaid: dict[str, DashboardStats]) -> Ag
                 (stats.techqa_stop - stats.techqa_start).total_seconds()
                 + (stats.finalqa_stop - stats.finalqa_start).total_seconds()
             )
-        if stats.start_notifications_count == 0:
-            aggregate.missing_start_count += 1
-        if stats.stop_notifications_count == 0:
-            aggregate.missing_stop_count += 1
+        # Only count AAIDs that have at least one START or STOP notification (exclude QA-only)
+        has_any_start_or_stop = stats.start_notifications_count > 0 or stats.stop_notifications_count > 0
+        if has_any_start_or_stop:
+            if stats.start_notifications_count == 0:
+                aggregate.missing_start_count += 1
+            if stats.stop_notifications_count == 0:
+                aggregate.missing_stop_count += 1
 
     if techqa_durations:
         aggregate.avg_techqa_seconds = sum(techqa_durations) / len(techqa_durations)
@@ -1444,6 +1431,12 @@ class DashboardUI:
         mode = self.notification_filter_mode.get()
         missing_start = stats.start_notifications_count == 0
         missing_stop = stats.stop_notifications_count == 0
+        has_any_start_or_stop = stats.start_notifications_count > 0 or stats.stop_notifications_count > 0
+
+        # Exclude QA-only AAIDs (no START or STOP) from START/STOP filters
+        if mode in ["Missing Start", "Missing Stop", "Missing Start and Stop"]:
+            if not has_any_start_or_stop:
+                return False
 
         if mode == "Missing Start":
             return missing_start
