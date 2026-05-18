@@ -602,6 +602,7 @@ def parse_stats_by_aaid_from_messages(
     start_notifications_by_aaid: dict[str, list[tuple[Optional[datetime], Optional[str]]]] = {}
     unique_start_sender_day_by_aaid: dict[str, set[tuple[str, str]]] = {}
     unique_stop_sender_day_by_aaid: dict[str, set[tuple[str, str]]] = {}
+    qa_sender_fallback_by_aaid: dict[str, str] = {}
 
     # First pass: collect stats and track start notifications
     for msg in message_list:
@@ -705,6 +706,14 @@ def parse_stats_by_aaid_from_messages(
         tester_name = stats.first_start_notification_sender
 
         if (
+            tester_name is None
+            and sender_name is not None
+            and (_is_techqa(subject) or _is_finalqa(subject))
+            and aaid not in qa_sender_fallback_by_aaid
+        ):
+            qa_sender_fallback_by_aaid[aaid] = sender_name
+
+        if (
             _is_techqa(subject)
             and stats.techqa_milestone_at is None
             and tester_name is not None
@@ -774,6 +783,13 @@ def parse_stats_by_aaid_from_messages(
         if stats.techqa_milestone_at and stats.last_stop_notification_at:
             if stats.techqa_milestone_at <= stats.last_stop_notification_at:
                 stats.has_techqa_overlap = True
+
+    # For QA-only AAIDs without START notifications, infer tester name from the
+    # earliest QA-related sender so details panel doesn't stay N/A.
+    for aaid, sender_name in qa_sender_fallback_by_aaid.items():
+        stats = stats_by_aaid.get(aaid)
+        if stats is not None and stats.first_start_notification_sender is None:
+            stats.first_start_notification_sender = sender_name
 
     return stats_by_aaid
 
@@ -1424,6 +1440,21 @@ class DashboardUI:
             return None
         return max(available)
 
+    def _matches_notification_filter(self, stats: DashboardStats) -> bool:
+        mode = self.notification_filter_mode.get()
+        missing_start = stats.start_notifications_count == 0
+        missing_stop = stats.stop_notifications_count == 0
+
+        if mode == "Missing Start":
+            return missing_start
+        if mode == "Missing Stop":
+            return missing_stop
+        if mode == "Missing Start and Stop":
+            return missing_start and missing_stop
+        if mode == "Complete (Start + Stop)":
+            return (not missing_start) and (not missing_stop)
+        return True
+
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Outlook QA Dashboard")
@@ -1441,6 +1472,7 @@ class DashboardUI:
         self.custom_start_date = tk.StringVar(value="")
         self.custom_end_date = tk.StringVar(value="")
         self.aaid_filter = tk.StringVar(value="")
+        self.notification_filter_mode = tk.StringVar(value="All Apps")
         self.debug_enabled = tk.BooleanVar(value=False)
 
         self.selected_aaid = tk.StringVar(value="N/A")
@@ -1639,6 +1671,17 @@ class DashboardUI:
         # Sorting controls for AAID results
         sort_frame = tk.Frame(frame)
         sort_frame.grid(row=8, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        tk.Label(sort_frame, text="Show:").pack(side="left", padx=(0, 2))
+        tk.OptionMenu(
+            sort_frame,
+            self.notification_filter_mode,
+            "All Apps",
+            "Missing Start",
+            "Missing Stop",
+            "Missing Start and Stop",
+            "Complete (Start + Stop)",
+            command=lambda _value: self._reload_aaid_list(reset_page=True),
+        ).pack(side="left", padx=(0, 10))
         tk.Label(sort_frame, text="Sort by:").pack(side="left")
         tk.Button(sort_frame, text="Start ↑", width=8, command=lambda: self._set_sort_mode("start_asc")).pack(side="left", padx=2)
         tk.Button(sort_frame, text="Start ↓", width=8, command=lambda: self._set_sort_mode("start_desc")).pack(side="left", padx=2)
@@ -2120,7 +2163,11 @@ class DashboardUI:
     def _reload_aaid_list(self, reset_page: bool = True) -> None:
         self.aaid_listbox.delete(0, tk.END)
         mode = self.aaid_sort_mode if hasattr(self, 'aaid_sort_mode') else "start_desc"
-        all_keys = list(self.stats_by_aaid.keys())
+        all_keys = [
+            key
+            for key, stats in self.stats_by_aaid.items()
+            if self._matches_notification_filter(stats)
+        ]
 
         def group_key(aaid_key: str) -> int:
             stats = self.stats_by_aaid[aaid_key]
