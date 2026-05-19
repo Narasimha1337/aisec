@@ -1724,24 +1724,7 @@ class DashboardUI:
         return max(available)
 
     def _matches_notification_filter(self, stats: DashboardStats) -> bool:
-        mode = self.notification_filter_mode.get()
-        missing_start = stats.start_notifications_count == 0
-        missing_stop = stats.stop_notifications_count == 0
-        has_any_start_or_stop = stats.start_notifications_count > 0 or stats.stop_notifications_count > 0
-
-        # Exclude QA-only AAIDs (no START or STOP) from START/STOP filters
-        if mode in ["Missing Start", "Missing Stop", "Missing Start and Stop"]:
-            if not has_any_start_or_stop:
-                return False
-
-        if mode == "Missing Start":
-            return missing_start
-        if mode == "Missing Stop":
-            return missing_stop
-        if mode == "Missing Start and Stop":
-            return missing_start and missing_stop
-        if mode == "Complete (Start + Stop)":
-            return (not missing_start) and (not missing_stop)
+        # Always show all apps (filter removed from UI)
         return True
 
     def __init__(self, root: tk.Tk):
@@ -1762,7 +1745,6 @@ class DashboardUI:
         self.custom_start_date = tk.StringVar(value="")
         self.custom_end_date = tk.StringVar(value="")
         self.aaid_filter = tk.StringVar(value="")
-        self.notification_filter_mode = tk.StringVar(value="All Apps")
         self.debug_enabled = tk.BooleanVar(value=False)
 
         self.selected_aaid = tk.StringVar(value="N/A")
@@ -2402,11 +2384,11 @@ class DashboardUI:
         top_row = tk.Frame(left_panel, bg=UI_PANEL)
         top_row.grid(row=0, column=0, sticky="ew", pady=(1, 0))
         top_row.grid_columnconfigure(0, weight=1)
-        tk.Label(top_row, text="Application [AAID]:", bg=UI_PANEL, fg=UI_TEXT, font=(UI_FONT_FAMILY, 10)).grid(row=0, column=0, sticky="w")
+        tk.Label(top_row, text="Application [AAID]", bg=UI_PANEL, fg=UI_TEXT, font=(UI_FONT_FAMILY, 10)).grid(row=0, column=0, sticky="w")
 
         sort_frame = tk.Frame(top_row, bg=UI_PANEL)
         sort_frame.grid(row=0, column=1, sticky="e")
-        tk.Label(sort_frame, text="Sort by:", bg=UI_PANEL, fg=UI_TEXT, font=(UI_FONT_FAMILY, 10)).pack(side="left")
+        tk.Label(sort_frame, text="", bg=UI_PANEL, fg=UI_TEXT, font=(UI_FONT_FAMILY, 10)).pack(side="left")
         self.start_sort_btn = _new_button(
             sort_frame,
             "Start ↕",
@@ -2423,36 +2405,10 @@ class DashboardUI:
         self.stop_sort_btn.pack(side="left", padx=1)
         self._refresh_sort_button_labels()
 
-        filter_row = tk.Frame(left_panel, bg=UI_PANEL)
-        filter_row.grid(row=1, column=0, sticky="ew", pady=(0, 2))
-        filter_row.grid_columnconfigure(0, weight=0)
-        filter_row.grid_columnconfigure(1, weight=0)
-
-        aaid_entry = tk.Entry(filter_row, textvariable=self.aaid_filter, width=34)
+        aaid_entry = tk.Entry(left_panel, textvariable=self.aaid_filter, width=30)
         _style_entry(aaid_entry)
-        aaid_entry.grid(row=0, column=0, sticky="w")
+        aaid_entry.grid(row=1, column=0, sticky="ew", pady=(2, 6))
         aaid_entry.bind("<KeyRelease>", self._on_aaid_filter_change)
-
-        show_frame = tk.Frame(filter_row, bg=UI_PANEL)
-        show_frame.grid(row=0, column=1, sticky="w", padx=(6, 0))
-        tk.Label(show_frame, text="Show:", bg=UI_PANEL, fg=UI_TEXT, font=(UI_FONT_FAMILY, 10)).pack(side="left", padx=(0, 2))
-
-        self.notification_filter_mode_cb = ttk.Combobox(
-            show_frame,
-            textvariable=self.notification_filter_mode,
-            values=[
-                "All Apps",
-                "Missing Start",
-                "Missing Stop",
-                "Missing Start and Stop",
-                "Complete (Start + Stop)",
-            ],
-            state="readonly",
-            style="Custom.TCombobox",
-            width=18,
-        )
-        self.notification_filter_mode_cb.pack(side="left")
-        self.notification_filter_mode_cb.bind("<<ComboboxSelected>>", lambda _e: self._reload_aaid_list(reset_page=True))
 
         aaid_list_frame = tk.Frame(left_panel)
         aaid_list_frame.grid(row=2, column=0, sticky="nsew")
