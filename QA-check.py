@@ -11,7 +11,7 @@ import time
 import tkinter as tk
 import tkinter.font as tkfont
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from tkinter import filedialog, messagebox
 from typing import Iterable, Optional
@@ -399,6 +399,8 @@ class DailyNotificationCounts:
     raw_stop_count: int = 0
     start_time: Optional[datetime] = None
     stop_time: Optional[datetime] = None
+    start_times: list[datetime] = field(default_factory=list)
+    stop_times: list[datetime] = field(default_factory=list)
 
 
 class OutlookFolderNotFoundError(Exception):
@@ -849,8 +851,8 @@ def parse_stats_by_aaid_from_messages(
     
     # Track all start notifications by AAID to capture sender of earliest one
     start_notifications_by_aaid: dict[str, list[tuple[Optional[datetime], Optional[str]]]] = {}
-    unique_start_sender_day_by_aaid: dict[str, set[tuple[str, str]]] = {}
-    unique_stop_sender_day_by_aaid: dict[str, set[tuple[str, str]]] = {}
+    unique_start_day_by_aaid: dict[str, set[str]] = {}
+    unique_stop_day_by_aaid: dict[str, set[str]] = {}
 
     # First pass: collect stats and track start notifications
     for msg in message_list:
@@ -907,13 +909,12 @@ def parse_stats_by_aaid_from_messages(
 
         if event_time is not None and is_pentest:
             date_key = event_time.strftime("%Y-%m-%d")
-            sender_key = _sender_dedupe_key(sender_name)
             if is_bracket_start or (is_notification_type and is_start):
-                start_unique = unique_start_sender_day_by_aaid.setdefault(aaid, set())
-                start_unique.add((date_key, sender_key))
+                start_unique = unique_start_day_by_aaid.setdefault(aaid, set())
+                start_unique.add(date_key)
             if is_bracket_stop or (is_notification_type and is_stop):
-                stop_unique = unique_stop_sender_day_by_aaid.setdefault(aaid, set())
-                stop_unique.add((date_key, sender_key))
+                stop_unique = unique_stop_day_by_aaid.setdefault(aaid, set())
+                stop_unique.add(date_key)
 
         if is_bracket_start or (is_notification_type and is_start):
             if aaid not in start_notifications_by_aaid:
@@ -921,8 +922,8 @@ def parse_stats_by_aaid_from_messages(
             start_notifications_by_aaid[aaid].append((event_time, sender_name))
 
     for aaid, stats in stats_by_aaid.items():
-        stats.start_notifications_count = len(unique_start_sender_day_by_aaid.get(aaid, set()))
-        stats.stop_notifications_count = len(unique_stop_sender_day_by_aaid.get(aaid, set()))
+        stats.start_notifications_count = len(unique_start_day_by_aaid.get(aaid, set()))
+        stats.stop_notifications_count = len(unique_stop_day_by_aaid.get(aaid, set()))
     
     # Second pass: set sender for earliest start notification
     for aaid, start_notifications in start_notifications_by_aaid.items():
@@ -1047,8 +1048,8 @@ def parse_daily_notification_counts_by_aaid(
     filter_aaid: Optional[set[str]] = None,
 ) -> dict[str, dict[str, DailyNotificationCounts]]:
     daily_counts_by_aaid: dict[str, dict[str, DailyNotificationCounts]] = {}
-    seen_daily_start_senders: dict[tuple[str, str], set[str]] = {}
-    seen_daily_stop_senders: dict[tuple[str, str], set[str]] = {}
+    seen_daily_start_presence: set[tuple[str, str]] = set()
+    seen_daily_stop_presence: set[tuple[str, str]] = set()
 
     for message in messages:
         try:
@@ -1095,26 +1096,25 @@ def parse_daily_notification_counts_by_aaid(
             daily_counts_by_aaid[aaid][date_key] = DailyNotificationCounts()
 
         day_counts = daily_counts_by_aaid[aaid][date_key]
-        sender_key = _sender_dedupe_key(sender_name)
-        sender_bucket_key = (aaid, date_key)
+        day_bucket_key = (aaid, date_key)
 
         if is_bracket_start or (is_notification_type and is_start):
             day_counts.raw_start_count += 1
+            day_counts.start_times.append(event_time)
             # Track the first start time
             if day_counts.start_time is None:
                 day_counts.start_time = event_time
-            start_seen = seen_daily_start_senders.setdefault(sender_bucket_key, set())
-            if sender_key not in start_seen:
-                start_seen.add(sender_key)
+            if day_bucket_key not in seen_daily_start_presence:
+                seen_daily_start_presence.add(day_bucket_key)
                 day_counts.start_count += 1
         if is_bracket_stop or (is_notification_type and is_stop):
             day_counts.raw_stop_count += 1
+            day_counts.stop_times.append(event_time)
             # Track the last stop time
             if day_counts.stop_time is None or event_time > day_counts.stop_time:
                 day_counts.stop_time = event_time
-            stop_seen = seen_daily_stop_senders.setdefault(sender_bucket_key, set())
-            if sender_key not in stop_seen:
-                stop_seen.add(sender_key)
+            if day_bucket_key not in seen_daily_stop_presence:
+                seen_daily_stop_presence.add(day_bucket_key)
                 day_counts.stop_count += 1
 
     return daily_counts_by_aaid
@@ -3029,7 +3029,14 @@ class DashboardUI:
             counts = daily_counts[date_key]
             # Daily notifications are valid only when there is exactly 1 start and 1 stop.
             is_alert = counts.start_count != 1 or counts.stop_count != 1
-            status = "ALERT" if is_alert else "OK"
+            if is_alert:
+                status = "ALERT"
+            elif counts.raw_start_count > 1:
+                status = "MULTIPLE START"
+            elif counts.raw_stop_count > 1:
+                status = "MULTIPLE STOP"
+            else:
+                status = "OK"
             # Show breakdown only if there are multiple raw notifications
             start_text = (
                 str(counts.start_count)
@@ -3041,9 +3048,15 @@ class DashboardUI:
                 if counts.raw_stop_count <= 1
                 else f"{counts.stop_count}({counts.raw_stop_count})"
             )
-            # Include timestamps if available
-            start_time_str = counts.start_time.strftime("%H:%M:%S") if counts.start_time else "N/A"
-            stop_time_str = counts.stop_time.strftime("%H:%M:%S") if counts.stop_time else "N/A"
+            # Include one or more timestamps if duplicates occurred on the same day.
+            if counts.start_times:
+                start_time_str = ", ".join(sorted({dt.strftime("%H:%M:%S") for dt in counts.start_times}))
+            else:
+                start_time_str = "N/A"
+            if counts.stop_times:
+                stop_time_str = ", ".join(sorted({dt.strftime("%H:%M:%S") for dt in counts.stop_times}))
+            else:
+                stop_time_str = "N/A"
             row_text = f"{date_key} | Start: {start_text} @ {start_time_str} | Stop: {stop_text} @ {stop_time_str} | {status}"
             self.daily_listbox.insert(tk.END, row_text)
             row_index = self.daily_listbox.size() - 1
