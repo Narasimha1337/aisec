@@ -1885,7 +1885,7 @@ class DashboardUI:
 
         container = tk.Frame(dialog, bg=background, padx=12, pady=12)
         container.pack(fill="both", expand=True)
-        container.grid_rowconfigure(2, weight=1)
+        container.grid_rowconfigure(1, weight=1)
         container.grid_columnconfigure(0, weight=1)
 
         header = tk.Frame(container, bg=header_bg, padx=18, pady=14)
@@ -1893,34 +1893,14 @@ class DashboardUI:
         header.grid_columnconfigure(0, weight=1)
         tk.Label(
             header,
-            text="Outlook QA Dashboard",
+            text="Outlook QA Dashboard - Kick Start Guide",
             bg=header_bg,
             fg=header_text,
-            font=(UI_FONT_FAMILY, 10),
-        ).grid(row=0, column=0, sticky="w")
-        tk.Label(
-            header,
-            text="Kick Start Guide",
-            bg=header_bg,
-            fg=header_text,
-            font=(UI_FONT_FAMILY, 10),
-        ).grid(row=1, column=0, sticky="w", pady=(3, 0))
-
-        banner = tk.Frame(container, bg=accent_bg, padx=14, pady=8)
-        banner.grid(row=1, column=0, sticky="ew", pady=(10, 10))
-        banner.grid_columnconfigure(0, weight=1)
-        tk.Label(
-            banner,
-            text="Use this page to learn the workflow quickly: pick a mailbox, refresh data, review the AAID list, then export or report issues.",
-            bg=accent_bg,
-            fg=UI_TEXT,
-            justify="left",
-            wraplength=900,
             font=(UI_FONT_FAMILY, 10),
         ).grid(row=0, column=0, sticky="w")
 
         body = tk.Frame(container, bg=background)
-        body.grid(row=2, column=0, sticky="nsew")
+        body.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
         body.grid_columnconfigure(0, weight=1)
         body.grid_rowconfigure(0, weight=1)
 
@@ -1963,6 +1943,15 @@ class DashboardUI:
             canvas.unbind_all("<MouseWheel>")
             dialog.destroy()
 
+        def _copy_selected_help_text(event) -> str:
+            try:
+                selected = event.widget.selection_get()
+            except tk.TclError:
+                return "break"
+            dialog.clipboard_clear()
+            dialog.clipboard_append(selected)
+            return "break"
+
         def add_card(parent: tk.Widget, title: str, lines: list[str], accent: str) -> None:
             card = tk.Frame(parent, bg=card_bg, bd=1, relief="solid", highlightthickness=1, highlightbackground="#d9e2ec")
             card.grid_propagate(True)
@@ -1978,17 +1967,22 @@ class DashboardUI:
 
             content = tk.Frame(card, bg=card_bg, padx=12, pady=10)
             content.pack(fill="both", expand=True)
-            for line in lines:
-                tk.Label(
-                    content,
-                    text=line,
-                    bg=card_bg,
-                    fg=body_text,
-                    anchor="w",
-                    justify="left",
-                    wraplength=420,
-                    font=(UI_FONT_FAMILY, 10),
-                ).pack(anchor="w", fill="x", pady=2)
+            card_text = tk.Text(
+                content,
+                wrap="word",
+                bg=card_bg,
+                fg=body_text,
+                relief="flat",
+                bd=0,
+                highlightthickness=0,
+                font=(UI_FONT_FAMILY, 10),
+                height=max(3, len(lines) + 1),
+                cursor="xterm",
+            )
+            card_text.pack(anchor="w", fill="x")
+            card_text.insert("1.0", "\n".join(lines))
+            card_text.config(state="disabled")
+            card_text.bind("<Control-c>", _copy_selected_help_text)
 
             return card
 
@@ -2055,6 +2049,9 @@ class DashboardUI:
                 [
                     "- If no results appear, verify the folder path and date range.",
                     "- If Outlook is not found, confirm the desktop client is installed and signed in.",
+                    "- Enable Dev Mode in PowerShell:",
+                    "  $env:OUTLOOK_QA_DEV_MODE = \"1\"",
+                    "  python outlook_qa_dashboard.py",
                     "- Use Debug Logs only when you need trace output.",
                 ],
                 "#d7ece7",
@@ -2418,7 +2415,7 @@ class DashboardUI:
             aaid_list_frame,
             exportselection=False,
             height=8,
-            justify="center",
+            justify="left",
             bg="white",
             fg=UI_TEXT,
             selectbackground="#cfe1f5",
@@ -2985,6 +2982,11 @@ class DashboardUI:
             if flags_str:
                 display += f"  {flags_str}"
             self.aaid_listbox.insert(tk.END, display)
+
+            # Highlight AAIDs with missing Start or Stop notifications.
+            row_index = self.aaid_listbox.size() - 1
+            if item_stats.start_notifications_count == 0 or item_stats.stop_notifications_count == 0:
+                self.aaid_listbox.itemconfig(row_index, fg="#c62828")
 
     def on_select_aaid(self, _event=None):
         selected = self.aaid_listbox.curselection()
