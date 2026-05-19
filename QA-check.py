@@ -9,6 +9,8 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
+import webbrowser
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from tkinter import filedialog, messagebox
@@ -20,6 +22,8 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(APP_DIR, "logs")
 LOG_BASENAME = "outlook_qa_dashboard_debug"
 LOG_EXT = ".log"
+SECURITY_LOG_BASENAME = "outlook_qa_dashboard_security"
+DEV_LOG_BASENAME = "outlook_qa_dashboard_dev"
 LOG_MAX_SIZE = 1 * 1024 * 1024  # 1 MB
 LOG_RETENTION_DAYS = 7
 
@@ -32,15 +36,50 @@ def _env_flag(name: str, default: bool) -> bool:
 
 
 SAFE_MODE = _env_flag("OUTLOOK_QA_SAFE_MODE", True)
+DEV_MODE = _env_flag("OUTLOOK_QA_DEV_MODE", False)
+FEEDBACK_TARGET_URL = os.environ.get(
+    "OUTLOOK_QA_FEEDBACK_URL",
+    "https://github.com/",
+).strip()
+
+UI_BG = "#eef3f8"
+UI_PANEL = "#ffffff"
+UI_PANEL_ALT = "#f7fafc"
+UI_HEADER = "#16324f"
+UI_ACCENT = "#5f8dd3"
+UI_ACCENT_SOFT = "#dce8f7"
+UI_TEXT = "#000000"
+UI_MUTED = "#000000"
+UI_BORDER = "#d9e2ec"
+UI_SUCCESS = "#d8f1df"
+UI_WARNING = "#f5e3c6"
+UI_INFO = "#dfe8f3"
+UI_VIOLET = "#eadcf6"
+UI_ROSE = "#f3d9d9"
+UI_FONT_FAMILY = "Segoe UI"
 
 
 def _current_log_path() -> str:
     return os.path.join(LOG_DIR, f"{LOG_BASENAME}{LOG_EXT}")
 
 
+def _current_security_log_path() -> str:
+    return os.path.join(LOG_DIR, f"{SECURITY_LOG_BASENAME}{LOG_EXT}")
+
+def _current_dev_log_path() -> str:
+    return os.path.join(LOG_DIR, f"{DEV_LOG_BASENAME}{LOG_EXT}")
+
+
 def _redact_subject(subject: str) -> str:
     digest = hashlib.sha256(subject.encode("utf-8", errors="ignore")).hexdigest()[:12]
     return f"subject_sha256={digest} len={len(subject)}"
+
+
+def _format_subject_for_logging(subject: str) -> str:
+    """Return unredacted subject if in DEV_MODE, otherwise redacted."""
+    if DEV_MODE:
+        return f"subject={subject[:500]}"  # Limit to first 500 chars for dev logs
+    return _redact_subject(subject)
 
 
 def _append_debug_log_line(line: str) -> None:
@@ -55,10 +94,114 @@ def _append_debug_log_line(line: str) -> None:
         pass
 
 
+def _append_dev_log_line(line: str) -> None:
+    """Append to dev log file with unredacted details."""
+    if not DEV_MODE:
+        return
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        dev_log_path = _current_dev_log_path()
+        rotate_log_if_needed(dev_log_path)
+        with open(dev_log_path, "a", encoding="utf-8") as dev_file:
+            dev_file.write(line + "\n")
+    except OSError:
+        pass
+
+
 def _user_error_message(default_message: str, exc: Optional[Exception] = None) -> str:
     if SAFE_MODE or exc is None:
         return default_message
     return f"{default_message}\n\n{exc}"
+
+
+def _configure_root_theme(root: tk.Tk) -> None:
+    root.configure(bg=UI_BG)
+    root.option_add("*Font", f"{{{UI_FONT_FAMILY}}} 10")
+    root.option_add("*Menu.Font", f"{{{UI_FONT_FAMILY}}} 10")
+    root.option_add("*Menubutton.Font", f"{{{UI_FONT_FAMILY}}} 10")
+    root.option_add("*Listbox.Font", f"{{{UI_FONT_FAMILY}}} 10")
+    root.option_add("*Checkbutton.Font", f"{{{UI_FONT_FAMILY}}} 10")
+    root.option_add("*Radiobutton.Font", f"{{{UI_FONT_FAMILY}}} 10")
+    root.option_add("*Foreground", UI_TEXT)
+    root.option_add("*Label.Foreground", UI_TEXT)
+    root.option_add("*Checkbutton.Foreground", UI_TEXT)
+    root.option_add("*Radiobutton.Foreground", UI_TEXT)
+    root.option_add("*Menubutton.Foreground", UI_TEXT)
+    root.option_add("*Entry.Foreground", UI_TEXT)
+    root.option_add("*Text.Foreground", UI_TEXT)
+    root.option_add("*Label.Background", UI_BG)
+    root.option_add("*Frame.Background", UI_BG)
+    root.option_add("*Button.Background", UI_PANEL)
+    root.option_add("*Button.Foreground", UI_TEXT)
+    root.option_add("*Button.Relief", "flat")
+    root.option_add("*Button.BorderWidth", 1)
+    root.option_add("*Entry.Relief", "flat")
+    root.option_add("*Entry.BorderWidth", 1)
+    root.option_add("*Text.Relief", "flat")
+    root.option_add("*Text.BorderWidth", 1)
+
+    for font_name in tkfont.names(root=root):
+        try:
+            tkfont.nametofont(font_name, root=root).configure(family=UI_FONT_FAMILY)
+        except tk.TclError:
+            pass
+
+
+def _style_button(button: tk.Button, *, variant: str = "secondary") -> tk.Button:
+    base_style = {
+        "bg": UI_ACCENT_SOFT,
+        "fg": UI_TEXT,
+        "activebackground": "#c7daef",
+        "activeforeground": UI_TEXT,
+        "highlightbackground": "#bfd0e2",
+    }
+    styles = {
+        "primary": base_style,
+        "success": base_style,
+        "soft": base_style,
+        "danger": base_style,
+        "ghost": base_style,
+        "secondary": base_style,
+    }
+    config = styles.get(variant, styles["secondary"])
+    button.configure(
+        bg=config["bg"],
+        fg=config["fg"],
+        activebackground=config["activebackground"],
+        activeforeground=config["activeforeground"],
+        highlightbackground=config["highlightbackground"],
+        relief="raised",
+        bd=1,
+        padx=6,
+        pady=3,
+        cursor="hand2",
+        font=(UI_FONT_FAMILY, 9),
+        takefocus=True,
+    )
+    return button
+
+
+def _new_button(parent: tk.Widget, text: str, command, *, variant: str = "secondary", width: Optional[int] = None) -> tk.Button:
+    kwargs = {"text": text, "command": command}
+    if width is not None:
+        kwargs["width"] = width
+    button = tk.Button(parent, **kwargs)
+    return _style_button(button, variant=variant)
+
+
+def _style_entry(entry: tk.Entry) -> tk.Entry:
+    entry.configure(
+        bg="white",
+        fg=UI_TEXT,
+        insertbackground=UI_TEXT,
+        relief="solid",
+        bd=1,
+        highlightthickness=1,
+        highlightbackground=UI_BORDER,
+        highlightcolor=UI_ACCENT,
+    )
+    return entry
+
 
 def rotate_log_if_needed(log_path):
     """
@@ -105,7 +248,58 @@ def setup_logging():
         format="%(asctime)s %(levelname)s %(message)s"
     )
 
+
+def setup_security_logging():
+    """Setup separate security logger for pentest/attack detection."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    sec_log_path = _current_security_log_path()
+    rotate_log_if_needed(sec_log_path)
+    
+    security_logger = logging.getLogger("security")
+    security_logger.setLevel(logging.WARNING)
+    
+    # Remove existing handlers to avoid duplicates
+    security_logger.handlers.clear()
+    
+    handler = logging.FileHandler(sec_log_path, encoding="utf-8")
+    handler.setLevel(logging.WARNING)
+    formatter = logging.Formatter("%(asctime)s [SECURITY] %(levelname)s %(message)s")
+    handler.setFormatter(formatter)
+    security_logger.addHandler(handler)
+    return security_logger
+
+
+def setup_dev_logging():
+    """Setup dev mode logger for detailed unredacted debugging."""
+    if not DEV_MODE:
+        return None
+    
+    os.makedirs(LOG_DIR, exist_ok=True)
+    dev_log_path = _current_dev_log_path()
+    rotate_log_if_needed(dev_log_path)
+    
+    dev_logger = logging.getLogger("dev")
+    dev_logger.setLevel(logging.DEBUG)
+    
+    # Remove existing handlers to avoid duplicates
+    dev_logger.handlers.clear()
+    
+    handler = logging.FileHandler(dev_log_path, encoding="utf-8")
+    handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter("%(asctime)s [DEV] %(message)s")
+    handler.setFormatter(formatter)
+    dev_logger.addHandler(handler)
+    return dev_logger
+
+
 setup_logging()
+SECURITY_LOGGER = setup_security_logging()
+DEV_LOGGER = setup_dev_logging()
+
+# Log dev mode status at startup
+if DEV_MODE:
+    _append_dev_log_line(f"[{datetime.now().isoformat()}] DEV_MODE ENABLED - Unredacted logging active")
+    logging.info("[DEV_MODE] Development mode enabled - detailed logging in logs/outlook_qa_dashboard_dev.log")
 
 
 START_RE = re.compile(r"\bstart(?:ed)?\b", re.IGNORECASE)
@@ -127,6 +321,53 @@ RUNTIME_DEPENDENCIES: list[tuple[str, str]] = [
     ("pywin32", "win32com"),
     ("openpyxl", "openpyxl"),
 ]
+
+
+# Security/Pentest Detection Patterns
+SQL_INJECTION_PATTERNS = re.compile(
+    r"(\b(SELECT|UNION|DROP|DELETE|INSERT|UPDATE|EXEC|EXECUTE|ALTER|CREATE)\b|'|--|;|\/\*|\*\/|xp_)",
+    re.IGNORECASE
+)
+COMMAND_INJECTION_PATTERNS = re.compile(r"([|&;`$()\\]|>|<|&&|\|\|)")
+PATH_TRAVERSAL_PATTERNS = re.compile(r"(\.\.\/|\.\.\\|\.\.%2[fF]|\.\.%5[cC])")
+XSS_PATTERNS = re.compile(r"(<script|<img|<iframe|<object|<embed|javascript:|onerror=|onload=)", re.IGNORECASE)
+SUSPICIOUS_LENGTH_THRESHOLD = 10000  # Emails with subjects > 10KB might be attack attempts
+
+
+def _detect_pentest_attempt(text: str, field_name: str = "input") -> Optional[str]:
+    """Detect common pentest/attack patterns. Returns threat description or None."""
+    if not text or not isinstance(text, str):
+        return None
+    
+    # Limit check: extremely long inputs might be buffer overflow attempts
+    if len(text) > SUSPICIOUS_LENGTH_THRESHOLD:
+        return f"Extremely long {field_name} ({len(text)} chars, threshold: {SUSPICIOUS_LENGTH_THRESHOLD})"
+    
+    # SQL Injection detection
+    if SQL_INJECTION_PATTERNS.search(text):
+        return f"SQL injection pattern detected in {field_name}"
+    
+    # Command Injection detection
+    if COMMAND_INJECTION_PATTERNS.search(text):
+        return f"Command injection pattern detected in {field_name}"
+    
+    # Path Traversal detection
+    if PATH_TRAVERSAL_PATTERNS.search(text):
+        return f"Path traversal pattern detected in {field_name}"
+    
+    # XSS detection
+    if XSS_PATTERNS.search(text):
+        return f"XSS/Script injection pattern detected in {field_name}"
+    
+    return None
+
+
+def _log_security_event(threat: str, context: dict = None) -> None:
+    """Log security event to separate security log file."""
+    context_str = " | ".join(f"{k}={v}" for k, v in (context or {}).items())
+    log_msg = f"{threat}" + (f" | {context_str}" if context_str else "")
+    SECURITY_LOGGER.warning(log_msg)
+    logging.info(f"[SECURITY] {log_msg}")  # Also log to main log
 
 
 @dataclass
@@ -546,10 +787,18 @@ def _apply_message_to_stats(
     is_notification_type = _is_notification(subject_text)
     is_pentest = "[PENTEST]" in subject_text.upper()
 
+    # DEV_MODE: Log full unredacted details for tracing
+    if DEV_MODE:
+        _append_dev_log_line(
+            f"[APPLY_STATS] Subject={subject_text[:500]} | Sender={sender_name} | "
+            f"is_start={is_start} is_stop={is_stop} is_bracket_start={is_bracket_start} "
+            f"is_bracket_stop={is_bracket_stop} is_notification={is_notification_type} is_pentest={is_pentest}"
+        )
+
     # DEBUG: Log parser signal details and keep subjects redacted by default.
     if hasattr(stats, '_log_debug'):
         stats._log_debug(
-            f"Processing subject: {_redact_subject(subject_text)} | "
+            f"Processing subject: {_format_subject_for_logging(subject_text)} | "
             f"is_pentest={is_pentest} "
             f"is_bracket_start={is_bracket_start} "
             f"is_bracket_stop={is_bracket_stop} "
@@ -609,13 +858,28 @@ def parse_stats_by_aaid_from_messages(
         if not subject:
             continue
 
+        # Security: Check for pentest/attack patterns
+        subject_threat = _detect_pentest_attempt(subject, "email_subject")
+        if subject_threat:
+            _log_security_event(subject_threat, {"aaid": extract_aaid(subject), "sender": sender_name})
+        
+        sender_threat = _detect_pentest_attempt(sender_name or "", "sender_name")
+        if sender_threat:
+            _log_security_event(sender_threat, {"sender": sender_name})
+
         event_time = _to_datetime(received_time)
         aaid = extract_aaid(subject)
         # DEBUG: Keep logs non-sensitive while still signaling parse activity.
         if debug_enabled:
             _append_debug_log_line(
-                f"[{datetime.now().isoformat()}] [PARSE] { _redact_subject(subject) }"
+                f"[{datetime.now().isoformat()}] [PARSE] { _format_subject_for_logging(subject) }"
             )
+            # DEV_MODE: Log full details with sender and timestamp
+            if DEV_MODE:
+                _append_dev_log_line(
+                    f"[{datetime.now().isoformat()}] [PARSE] AAID={aaid} | "
+                    f"Sender={sender_name} | Subject={subject[:500]}"
+                )
         # Filter by AAID if specified
         if filter_aaid is not None and aaid not in filter_aaid:
             continue
@@ -1129,6 +1393,11 @@ def export_stats_to_excel(stats_by_aaid: dict[str, DashboardStats], file_path: s
 
 
 def _split_path(folder_path: str) -> list[str]:
+    # Security: Check for path traversal attempts
+    traversal_threat = _detect_pentest_attempt(folder_path, "folder_path")
+    if traversal_threat:
+        _log_security_event(traversal_threat, {"folder_path": folder_path})
+    
     return [part.strip() for part in folder_path.split("/") if part.strip()]
 
 
@@ -1377,7 +1646,34 @@ def read_messages_from_all_mailboxes(
 class DashboardUI:
     def _set_sort_mode(self, mode):
         self.aaid_sort_mode = mode
+        self._refresh_sort_button_labels()
         self._reload_aaid_list(reset_page=True)
+
+    def _toggle_sort_mode(self, metric: str) -> None:
+        if metric == "start":
+            next_mode = "start_desc" if self.aaid_sort_mode == "start_asc" else "start_asc"
+        elif metric == "stop":
+            next_mode = "stop_desc" if self.aaid_sort_mode == "stop_asc" else "stop_asc"
+        else:
+            return
+        self._set_sort_mode(next_mode)
+
+    def _refresh_sort_button_labels(self) -> None:
+        if hasattr(self, "start_sort_btn"):
+            if self.aaid_sort_mode == "start_asc":
+                self.start_sort_btn.configure(text="Start ↑")
+            elif self.aaid_sort_mode == "start_desc":
+                self.start_sort_btn.configure(text="Start ↓")
+            else:
+                self.start_sort_btn.configure(text="Start ↕")
+
+        if hasattr(self, "stop_sort_btn"):
+            if self.aaid_sort_mode == "stop_asc":
+                self.stop_sort_btn.configure(text="Stop ↑")
+            elif self.aaid_sort_mode == "stop_desc":
+                self.stop_sort_btn.configure(text="Stop ↓")
+            else:
+                self.stop_sort_btn.configure(text="Stop ↕")
 
     def _is_qa_only_aaid(self, stats: DashboardStats) -> bool:
         has_notifications = stats.start_notifications_count > 0 or stats.stop_notifications_count > 0
@@ -1450,6 +1746,7 @@ class DashboardUI:
 
     def __init__(self, root: tk.Tk):
         self.root = root
+        _configure_root_theme(self.root)
         self.root.title("Outlook QA Dashboard")
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
@@ -1497,8 +1794,53 @@ class DashboardUI:
         self._mailbox_init_in_progress = False
 
         self.status_var = tk.StringVar(value="Ready.")
-        self.status_label = tk.Label(self.root, textvariable=self.status_var, anchor="w", fg="blue")
-        self.status_label.pack(fill="x", padx=12, pady=(0, 4))
+        status_row = tk.Frame(self.root, bg=UI_BG)
+        status_row.pack(fill="x", padx=12, pady=(0, 4))
+        self.status_label = tk.Label(
+            status_row,
+            textvariable=self.status_var,
+            anchor="w",
+            fg=UI_TEXT,
+            bg=UI_BG,
+            font=(UI_FONT_FAMILY, 10),
+        )
+        self.status_label.pack(side="left", fill="x", expand=True)
+
+
+        def _add_status_link(text: str, command, *, pad_right: int = 0) -> None:
+            link = tk.Label(
+                status_row,
+                text=text,
+                bg=UI_BG,
+                fg=UI_MUTED,
+                cursor="hand2",
+                font=(UI_FONT_FAMILY, 10, "underline"),
+                padx=4,
+                pady=1,
+            )
+            link.pack(side="right", padx=(0, pad_right))
+            link.bind("<Button-1>", lambda _event: command())
+            link.bind("<Enter>", lambda _event, lbl=link: lbl.configure(fg=UI_TEXT))
+            link.bind("<Leave>", lambda _event, lbl=link: lbl.configure(fg=UI_MUTED))
+
+        _add_status_link("Help", self._open_help_dialog)
+        _add_status_link("Feedback", self._open_feedback_link, pad_right=8)
+
+        # Add Enable Debug Logs checkbox before the links (to the right side)
+        debug_chk = tk.Checkbutton(
+            status_row,
+            text="Enable Debug Logs",
+            variable=self.debug_enabled,
+            bg=UI_BG,
+            font=(UI_FONT_FAMILY, 10),
+            padx=4,
+            pady=1,
+            highlightthickness=0,
+            activebackground=UI_BG,
+            selectcolor=UI_BG,
+            bd=0,
+        )
+        debug_chk.pack(side="right", padx=(0, 8))
 
         # Aggregate statistics StringVars (Statistics tab)
         self.stat_total_apps = tk.StringVar(value="0")
@@ -1527,6 +1869,232 @@ class DashboardUI:
         _append_debug_log_line(
             f"[{datetime.now().isoformat()}] {_safe_log_text(message, max_len=2000)}"
         )
+
+    def _open_feedback_link(self) -> None:
+        if not FEEDBACK_TARGET_URL:
+            self.status_var.set("Feedback URL is not configured.")
+            messagebox.showinfo(
+                "No feedback URL",
+                "Set OUTLOOK_QA_FEEDBACK_URL to open feedback directly.",
+            )
+            return
+
+        if webbrowser.open(FEEDBACK_TARGET_URL):
+            self.status_var.set("Opened feedback URL.")
+        else:
+            self.status_var.set("Unable to open feedback URL.")
+
+    def _open_help_dialog(self) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Help / Kick Start Guide")
+        dialog.grab_set()
+        dialog.geometry("980x720")
+        dialog.minsize(900, 640)
+        dialog.resizable(True, True)
+
+        background = "#f4f7fb"
+        header_bg = "#17324d"
+        accent_bg = "#dfe9f5"
+        card_bg = "#ffffff"
+        header_text = "#f6fbff"
+        body_text = "#2a3a4d"
+
+        dialog.configure(bg=background)
+
+        container = tk.Frame(dialog, bg=background, padx=12, pady=12)
+        container.pack(fill="both", expand=True)
+        container.grid_rowconfigure(2, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+
+        header = tk.Frame(container, bg=header_bg, padx=18, pady=14)
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            header,
+            text="Outlook QA Dashboard",
+            bg=header_bg,
+            fg=header_text,
+            font=(UI_FONT_FAMILY, 10),
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            header,
+            text="Kick Start Guide",
+            bg=header_bg,
+            fg=header_text,
+            font=(UI_FONT_FAMILY, 10),
+        ).grid(row=1, column=0, sticky="w", pady=(3, 0))
+
+        banner = tk.Frame(container, bg=accent_bg, padx=14, pady=8)
+        banner.grid(row=1, column=0, sticky="ew", pady=(10, 10))
+        banner.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            banner,
+            text="Use this page to learn the workflow quickly: pick a mailbox, refresh data, review the AAID list, then export or report issues.",
+            bg=accent_bg,
+            fg=UI_TEXT,
+            justify="left",
+            wraplength=900,
+            font=(UI_FONT_FAMILY, 10),
+        ).grid(row=0, column=0, sticky="w")
+
+        body = tk.Frame(container, bg=background)
+        body.grid(row=2, column=0, sticky="nsew")
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+
+        scroll_container = tk.Frame(body, bg=background)
+        scroll_container.grid(row=0, column=0, sticky="nsew")
+        scroll_container.grid_rowconfigure(0, weight=1)
+        scroll_container.grid_columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(scroll_container, bg=background, highlightthickness=0)
+        v_scroll = tk.Scrollbar(scroll_container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=v_scroll.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        v_scroll.grid(row=0, column=1, sticky="ns")
+
+        content = tk.Frame(canvas, bg=background)
+        content_window = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def _sync_scroll_region(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _sync_content_width(event) -> None:
+            canvas.itemconfigure(content_window, width=event.width)
+
+        content.bind("<Configure>", _sync_scroll_region)
+        canvas.bind("<Configure>", _sync_content_width)
+
+        guide_col = tk.Frame(content, bg=background)
+        guide_col.grid(row=0, column=0, sticky="nsew")
+        content.grid_columnconfigure(0, weight=1)
+        guide_col.grid_columnconfigure(0, weight=1)
+        guide_col.grid_columnconfigure(1, weight=1)
+
+        def _on_mousewheel(event) -> None:
+            delta = -1 * int(event.delta / 120)
+            canvas.yview_scroll(delta, "units")
+
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _cleanup_and_close() -> None:
+            canvas.unbind_all("<MouseWheel>")
+            dialog.destroy()
+
+        def add_card(parent: tk.Widget, title: str, lines: list[str], accent: str) -> None:
+            card = tk.Frame(parent, bg=card_bg, bd=1, relief="solid", highlightthickness=1, highlightbackground="#d9e2ec")
+            card.grid_propagate(True)
+            title_bar = tk.Frame(card, bg=accent, padx=12, pady=8)
+            title_bar.pack(fill="x")
+            tk.Label(
+                title_bar,
+                text=title,
+                bg=accent,
+                fg=UI_TEXT,
+                font=(UI_FONT_FAMILY, 10),
+            ).pack(anchor="w")
+
+            content = tk.Frame(card, bg=card_bg, padx=12, pady=10)
+            content.pack(fill="both", expand=True)
+            for line in lines:
+                tk.Label(
+                    content,
+                    text=line,
+                    bg=card_bg,
+                    fg=body_text,
+                    anchor="w",
+                    justify="left",
+                    wraplength=420,
+                    font=(UI_FONT_FAMILY, 10),
+                ).pack(anchor="w", fill="x", pady=2)
+
+            return card
+
+        help_sections = [
+            (
+                "1. Start here",
+                [
+                    "- Make sure Outlook desktop is open and signed in.",
+                    "- Choose the correct mailbox and folder path.",
+                    "- Click Refresh after selecting the date range.",
+                ],
+                "#c7d8ff",
+            ),
+            (
+                "2. Main inputs",
+                [
+                    "- Mailbox picks the Outlook root mailbox.",
+                    "- Outlook Folder uses / separators, for example Inbox or Mailbox/Inbox/Project.",
+                    "- Max Emails caps how many messages are scanned.",
+                    "- Subject Contains narrows the message set.",
+                    "- Date Range supports presets or Custom Range.",
+                ],
+                "#d8f1df",
+            ),
+            (
+                "3. What Refresh does",
+                [
+                    "- Reads Outlook messages from the selected folder.",
+                    "- Groups messages by AAID and calculates Start and Stop counts.",
+                    "- Detects TechQA and Final QA timeline events.",
+                    "- Updates the list, details panel, daily check, and statistics.",
+                ],
+                "#f5e3c6",
+            ),
+            (
+                "4. How to read the results",
+                [
+                    "- Select an AAID to see counts, timestamps, and QA milestones.",
+                    "- Daily Notification Check shows whether each day has exactly 1 Start and 1 Stop.",
+                    "- Rows marked ALERT need attention because the counts are not balanced.",
+                ],
+                "#dfe8f3",
+            ),
+            (
+                "5. Useful filters",
+                [
+                    "- Show filters Missing Start, Missing Stop, or complete records.",
+                    "- Sort by changes the AAID order by Start or Stop counts.",
+                    "- Application [AAID] lets you type one or more AAIDs separated by commas.",
+                ],
+                "#eadcf6",
+            ),
+            (
+                "6. Export and support",
+                [
+                    "- Export to Excel saves the current results to .xlsx.",
+                    f"- Feedback opens {FEEDBACK_TARGET_URL or 'the issue tracker'}.",
+                    "- Use it for bugs, feature requests, or tester notes.",
+                ],
+                "#f3d9d9",
+            ),
+            (
+                "7. Tips",
+                [
+                    "- If no results appear, verify the folder path and date range.",
+                    "- If Outlook is not found, confirm the desktop client is installed and signed in.",
+                    "- Use Debug Logs only when you need trace output.",
+                ],
+                "#d7ece7",
+            ),
+        ]
+
+        for idx, (title, lines, accent) in enumerate(help_sections):
+            row_idx = idx // 2
+            col_idx = idx % 2
+            card = add_card(guide_col, title, lines, accent)
+            if idx == len(help_sections) - 1 and len(help_sections) % 2 == 1:
+                card.grid(row=row_idx, column=0, columnspan=2, sticky="ew", padx=2, pady=(0, 10))
+            else:
+                card.grid(row=row_idx, column=col_idx, sticky="nsew", padx=2, pady=(0, 10))
+
+        # Bottom spacer keeps last card clear from the viewport edge.
+        guide_col.grid_rowconfigure((len(help_sections) + 1) // 2, minsize=10)
+
+        scroll_container.update_idletasks()
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+        dialog.protocol("WM_DELETE_WINDOW", _cleanup_and_close)
 
     def _init_mailboxes_async(self) -> None:
         if self._mailbox_init_in_progress:
@@ -1594,8 +2162,10 @@ class DashboardUI:
 
     def _toggle_custom_dates(self):
         if self.range_option.get() == "Custom Range":
+            self.custom_dates_label.grid()
             self.custom_dates_row.grid()
         else:
+            self.custom_dates_label.grid_remove()
             self.custom_dates_row.grid_remove()
 
     def _on_range_option_changed(self, _selected=None):
@@ -1652,127 +2222,271 @@ class DashboardUI:
         self.max_emails.set(str(recommended))
 
     def _build(self):
-        frame = tk.Frame(self.root, padx=12, pady=0)
-        frame.pack(fill="both", expand=True)
+        shell = tk.Frame(self.root, bg=UI_BG, padx=8, pady=4)
+        shell.pack(fill="both", expand=True)
+        shell.grid_rowconfigure(0, weight=1)
+        shell.grid_columnconfigure(0, weight=1)
+
+        frame = tk.Frame(shell, bg=UI_BG)
+        frame.grid(row=0, column=0, sticky="nsew")
         frame.grid_rowconfigure(7, weight=1)
 
-        # Statistics panel in top-right corner spanning the input rows.
-        stats_panel = tk.LabelFrame(frame, text="Statistics", padx=10, pady=6)
-        stats_panel.grid(row=0, column=4, rowspan=7, sticky="nsew", padx=(8, 0), pady=(2, 8))
-        self._build_statistics_panel(stats_panel)
+        def make_card(parent: tk.Widget, title: str, *, row: int, column: int, rowspan: int = 1, columnspan: int = 1, padx=(0, 0), pady=(0, 0), min_header: bool = False) -> tuple[tk.Frame, tk.Frame]:
+            outer = tk.Frame(parent, bg=UI_PANEL, bd=1, relief="solid", highlightthickness=1, highlightbackground=UI_BORDER)
+            outer.grid(row=row, column=column, rowspan=rowspan, columnspan=columnspan, sticky="nsew", padx=padx, pady=pady)
+            outer.grid_columnconfigure(0, weight=1)
+            header_height = 6 if min_header else 7
+            header = tk.Frame(outer, bg=UI_ACCENT_SOFT, padx=8, pady=header_height)
+            header.grid(row=0, column=0, sticky="ew")
+            tk.Label(header, text=title, bg=UI_ACCENT_SOFT, fg=UI_TEXT, font=("Segoe UI", 10, "bold")).pack(anchor="w")
+            body = tk.Frame(outer, bg=UI_PANEL, padx=6, pady=4)
+            body.grid(row=1, column=0, sticky="nsew")
+            return outer, body
+
+        # Statistics panel styled as a card, matching AAID Details
+        stats_outer = tk.Frame(frame, bg=UI_PANEL, bd=1, relief="solid", highlightthickness=1, highlightbackground=UI_BORDER)
+        stats_outer.grid(row=0, column=4, rowspan=7, sticky="nsew", padx=(16, 0), pady=(1, 4))
+        stats_outer.grid_columnconfigure(0, weight=1)
+        stats_header = tk.Frame(stats_outer, bg=UI_ACCENT_SOFT, padx=8, pady=7)
+        stats_header.grid(row=0, column=0, sticky="ew")
+        tk.Label(stats_header, text="Statistics", bg=UI_ACCENT_SOFT, fg=UI_TEXT, font=(UI_FONT_FAMILY, 10, "bold")).pack(anchor="w")
+        stats_body = tk.Frame(stats_outer, bg=UI_PANEL, padx=6, pady=4)
+        stats_body.grid(row=1, column=0, sticky="nsew")
+        self._build_statistics_panel(stats_body)
 
         # Sorting controls for AAID results
-        sort_frame = tk.Frame(frame)
-        sort_frame.grid(row=8, column=0, columnspan=2, sticky="w", pady=(2, 0))
-        tk.Label(sort_frame, text="Show:").pack(side="left", padx=(0, 2))
-        tk.OptionMenu(
-            sort_frame,
-            self.notification_filter_mode,
-            "All Apps",
-            "Missing Start",
-            "Missing Stop",
-            "Missing Start and Stop",
-            "Complete (Start + Stop)",
-            command=lambda _value: self._reload_aaid_list(reset_page=True),
-        ).pack(side="left", padx=(0, 10))
-        tk.Label(sort_frame, text="Sort by:").pack(side="left")
-        tk.Button(sort_frame, text="Start ↑", width=8, command=lambda: self._set_sort_mode("start_asc")).pack(side="left", padx=2)
-        tk.Button(sort_frame, text="Start ↓", width=8, command=lambda: self._set_sort_mode("start_desc")).pack(side="left", padx=2)
-        tk.Button(sort_frame, text="Stop ↑", width=8, command=lambda: self._set_sort_mode("stop_asc")).pack(side="left", padx=2)
-        tk.Button(sort_frame, text="Stop ↓", width=8, command=lambda: self._set_sort_mode("stop_desc")).pack(side="left", padx=2)
+        import tkinter.ttk as ttk
 
-        tk.Label(frame, text="Mailbox:").grid(row=0, column=0, sticky="w", pady=(2, 2))
-        mailbox_row = tk.Frame(frame)
-        mailbox_row.grid(row=0, column=1, columnspan=2, sticky="w", pady=(2, 2))
-        # Ensure OptionMenu always has at least one value to avoid init error
-        mailbox_options = self.mailbox_names if self.mailbox_names else ["Default Mailbox"]
-        self.mailbox_menu = tk.OptionMenu(mailbox_row, self.selected_mailbox, *mailbox_options)
-        self.mailbox_menu.pack(side="left")
-        tk.Checkbutton(mailbox_row, text="Enable Debug Logs", variable=self.debug_enabled).pack(
-            side="left", padx=(10, 0)
+        # Custom style for Combobox to match button style
+        style = ttk.Style()
+        style.theme_use('default')
+        style.configure(
+            "Custom.TCombobox",
+            fieldbackground=UI_ACCENT_SOFT,
+            background=UI_ACCENT_SOFT,
+            foreground=UI_TEXT,
+            bordercolor=UI_BORDER,
+            borderwidth=1,
+            relief="raised",
+            padding=2,
+            font=(UI_FONT_FAMILY, 9),
+            arrowcolor=UI_TEXT,
         )
+        style.map(
+            "Custom.TCombobox",
+            fieldbackground=[('readonly', UI_ACCENT_SOFT)],
+            background=[('readonly', UI_ACCENT_SOFT)],
+            foreground=[('readonly', UI_TEXT)],
+        )
+
+        control_col_width = 240
+
+        tk.Label(frame, text="Mailbox:").grid(row=0, column=0, sticky="w", pady=(1, 1))
+        mailbox_row = tk.Frame(frame, bg=UI_BG)
+        mailbox_row.grid(row=0, column=1, columnspan=2, sticky="ew", pady=(1, 1))
+        mailbox_row.grid_propagate(False)
+        mailbox_row.configure(width=control_col_width)
+        mailbox_options = self.mailbox_names if self.mailbox_names else ["Default Mailbox"]
+        self.mailbox_menu_cb = ttk.Combobox(
+            mailbox_row,
+            textvariable=self.selected_mailbox,
+            values=mailbox_options,
+            state="readonly",
+            style="Custom.TCombobox",
+            width=25,
+        )
+        self.mailbox_menu_cb.pack(side="left", fill="x", expand=True)
+        # Debug logs checkbox removed from mailbox row (now only in status row)
 
     # _reload_mailboxes removed; mailboxes now load automatically at startup
 
         tk.Label(frame, text="Outlook Folder (use /):").grid(row=1, column=0, sticky="w")
-        tk.Entry(frame, textvariable=self.folder_path, width=50).grid(row=1, column=1, sticky="ew", pady=4)
+        folder_entry = tk.Entry(frame, textvariable=self.folder_path, width=25)
+        _style_entry(folder_entry)
+        folder_entry.grid(row=1, column=1, sticky="ew", pady=2)
 
         tk.Label(frame, text="Max Emails:").grid(row=2, column=0, sticky="w")
-        tk.Entry(frame, textvariable=self.max_emails, width=12).grid(row=2, column=1, sticky="w", pady=4)
+        max_entry = tk.Entry(frame, textvariable=self.max_emails, width=25)
+        _style_entry(max_entry)
+        max_entry.grid(row=2, column=1, sticky="ew", pady=2)
 
         tk.Label(frame, text="Subject Contains (optional):").grid(row=3, column=0, sticky="w")
-        subject_frame = tk.Frame(frame)
-        subject_frame.grid(row=3, column=1, sticky="ew", pady=4)
-        tk.Entry(subject_frame, textvariable=self.subject_contains, width=50).pack(side="left", fill="x", expand=True)
+        subject_frame = tk.Frame(frame, bg=UI_BG)
+        subject_frame.grid(row=3, column=1, sticky="ew", pady=2)
+        subject_entry = tk.Entry(subject_frame, textvariable=self.subject_contains, width=25)
+        _style_entry(subject_entry)
+        subject_entry.pack(side="left", fill="x", expand=True)
 
         tk.Label(frame, text="Date Range:").grid(row=4, column=0, sticky="w")
-        range_menu = tk.OptionMenu(
+        self.range_menu_cb = ttk.Combobox(
             frame,
-            self.range_option,
-            "Last 1 Week",
-            "Last 1 Month",
-            "Last 3 Months",
-            "Last 6 Months",
-            "Custom Range",
-            command=self._on_range_option_changed,
+            textvariable=self.range_option,
+            values=[
+                "Last 1 Week",
+                "Last 1 Month",
+                "Last 3 Months",
+                "Last 6 Months",
+                "Custom Range",
+            ],
+            state="readonly",
+            style="Custom.TCombobox",
+            width=25,
         )
-        range_menu.grid(row=4, column=1, sticky="w", pady=4)
+        self.range_menu_cb.grid(row=4, column=1, sticky="ew", pady=2)
+        self.range_menu_cb.bind("<<ComboboxSelected>>", lambda _e: self._on_range_option_changed())
 
-        self.custom_dates_row = tk.Frame(frame)
-        self.custom_dates_row.grid(row=5, column=0, columnspan=4, sticky="w", pady=4)
-        self.custom_start_label = tk.Label(self.custom_dates_row, text="Custom Start (YYYY-MM-DD):")
-        self.custom_start_label.pack(side="left")
-        self.custom_start_entry = tk.Entry(self.custom_dates_row, textvariable=self.custom_start_date, width=14)
-        self.custom_start_entry.pack(side="left", padx=(6, 16))
-        self.custom_end_label = tk.Label(self.custom_dates_row, text="End:")
-        self.custom_end_label.pack(side="left")
-        self.custom_end_entry = tk.Entry(self.custom_dates_row, textvariable=self.custom_end_date, width=14)
-        self.custom_end_entry.pack(side="left", padx=(6, 0))
+        self.custom_dates_label = tk.Label(frame, text="Custom Date (YYYY-MM-DD):")
+        self.custom_dates_label.grid(row=5, column=0, sticky="w", pady=2)
+
+        self.custom_dates_row = tk.Frame(frame, bg=UI_BG, width=control_col_width)
+        self.custom_dates_row.grid(row=5, column=1, columnspan=2, sticky="ew", pady=2)
+        self.custom_dates_row.grid_propagate(False)
+
+        # Try to use tkcalendar.DateEntry for date picking, fallback to Entry if unavailable
+        try:
+            from tkcalendar import DateEntry
+            self.custom_start_entry = DateEntry(
+                self.custom_dates_row,
+                textvariable=self.custom_start_date,
+                width=12,
+                date_pattern="yyyy-mm-dd",
+                background=UI_PANEL,
+                foreground=UI_TEXT,
+                borderwidth=1,
+                font=(UI_FONT_FAMILY, 9),
+            )
+            self.custom_start_entry.pack(side="left", padx=(0, 10))
+            self.custom_end_entry = DateEntry(
+                self.custom_dates_row,
+                textvariable=self.custom_end_date,
+                width=12,
+                date_pattern="yyyy-mm-dd",
+                background=UI_PANEL,
+                foreground=UI_TEXT,
+                borderwidth=1,
+                font=(UI_FONT_FAMILY, 9),
+            )
+            self.custom_end_entry.pack(side="left", padx=(4, 0))
+            # Bind date selection event
+            self.custom_start_entry.bind("<<DateEntrySelected>>", self._on_custom_date_changed)
+            self.custom_end_entry.bind("<<DateEntrySelected>>", self._on_custom_date_changed)
+        except ImportError:
+            self.custom_start_entry = tk.Entry(self.custom_dates_row, textvariable=self.custom_start_date, width=14)
+            _style_entry(self.custom_start_entry)
+            self.custom_start_entry.pack(side="left", padx=(0, 10))
+            self.custom_end_entry = tk.Entry(self.custom_dates_row, textvariable=self.custom_end_date, width=14)
+            _style_entry(self.custom_end_entry)
+            self.custom_end_entry.pack(side="left", padx=(4, 0))
+            self.custom_start_entry.bind("<KeyRelease>", self._on_custom_date_changed)
+            self.custom_end_entry.bind("<KeyRelease>", self._on_custom_date_changed)
+
+        self.custom_dates_label.grid_remove()
         self.custom_dates_row.grid_remove()
-        self.custom_start_entry.bind("<KeyRelease>", self._on_custom_date_changed)
-        self.custom_end_entry.bind("<KeyRelease>", self._on_custom_date_changed)
 
-        button_frame = tk.Frame(frame)
-        button_frame.grid(row=6, column=1, sticky="w", pady=8)
-        tk.Button(button_frame, text="Refresh", command=self.refresh).grid(row=0, column=0, padx=(0, 8))
-        tk.Button(button_frame, text="Export to Excel", command=self.export_excel).grid(row=0, column=1)
+        button_frame = tk.Frame(frame, bg=UI_BG)
+        button_frame.grid(row=6, column=1, sticky="w", pady=4)
+        _new_button(button_frame, "Refresh", self.refresh, variant="primary").grid(row=0, column=0, padx=(0, 6))
+        _new_button(button_frame, "Export to Excel", self.export_excel, variant="success").grid(row=0, column=1)
 
-        results_frame = tk.Frame(frame)
-        results_frame.grid(row=7, column=0, columnspan=5, sticky="nsew")
+        results_frame = tk.Frame(frame, bg=UI_BG)
+        results_frame.grid(row=7, column=0, columnspan=5, sticky="nsew", pady=(0, 6))
         results_frame.grid_rowconfigure(0, weight=1)
         results_frame.grid_columnconfigure(0, weight=0)
         results_frame.grid_columnconfigure(1, weight=1)
 
-        left_panel = tk.LabelFrame(results_frame, text="AAID Results", padx=8, pady=6)
-        left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 18))
+        left_outer, left_panel = make_card(results_frame, "AAID Results", row=0, column=0, padx=(0, 8), pady=(8, 0))
+        left_outer.grid_rowconfigure(1, weight=1)
         left_panel.grid_rowconfigure(2, weight=1)
         left_panel.grid_columnconfigure(0, weight=1)
-        tk.Label(left_panel, text="Application [AAID]:").grid(row=0, column=0, sticky="w", pady=(4, 2))
-        aaid_entry = tk.Entry(left_panel, textvariable=self.aaid_filter, width=30)
-        aaid_entry.grid(row=1, column=0, sticky="ew", pady=(4, 16))
+
+        top_row = tk.Frame(left_panel, bg=UI_PANEL)
+        top_row.grid(row=0, column=0, sticky="ew", pady=(1, 0))
+        top_row.grid_columnconfigure(0, weight=1)
+        tk.Label(top_row, text="Application [AAID]:", bg=UI_PANEL, fg=UI_TEXT, font=(UI_FONT_FAMILY, 10)).grid(row=0, column=0, sticky="w")
+
+        sort_frame = tk.Frame(top_row, bg=UI_PANEL)
+        sort_frame.grid(row=0, column=1, sticky="e")
+        tk.Label(sort_frame, text="Sort by:", bg=UI_PANEL, fg=UI_TEXT, font=(UI_FONT_FAMILY, 10)).pack(side="left")
+        self.start_sort_btn = _new_button(
+            sort_frame,
+            "Start ↕",
+            lambda: self._toggle_sort_mode("start"),
+            variant="soft",
+        )
+        self.start_sort_btn.pack(side="left", padx=1)
+        self.stop_sort_btn = _new_button(
+            sort_frame,
+            "Stop ↕",
+            lambda: self._toggle_sort_mode("stop"),
+            variant="soft",
+        )
+        self.stop_sort_btn.pack(side="left", padx=1)
+        self._refresh_sort_button_labels()
+
+        filter_row = tk.Frame(left_panel, bg=UI_PANEL)
+        filter_row.grid(row=1, column=0, sticky="ew", pady=(0, 2))
+        filter_row.grid_columnconfigure(0, weight=0)
+        filter_row.grid_columnconfigure(1, weight=0)
+
+        aaid_entry = tk.Entry(filter_row, textvariable=self.aaid_filter, width=34)
+        _style_entry(aaid_entry)
+        aaid_entry.grid(row=0, column=0, sticky="w")
         aaid_entry.bind("<KeyRelease>", self._on_aaid_filter_change)
+
+        show_frame = tk.Frame(filter_row, bg=UI_PANEL)
+        show_frame.grid(row=0, column=1, sticky="w", padx=(6, 0))
+        tk.Label(show_frame, text="Show:", bg=UI_PANEL, fg=UI_TEXT, font=(UI_FONT_FAMILY, 10)).pack(side="left", padx=(0, 2))
+
+        self.notification_filter_mode_cb = ttk.Combobox(
+            show_frame,
+            textvariable=self.notification_filter_mode,
+            values=[
+                "All Apps",
+                "Missing Start",
+                "Missing Stop",
+                "Missing Start and Stop",
+                "Complete (Start + Stop)",
+            ],
+            state="readonly",
+            style="Custom.TCombobox",
+            width=18,
+        )
+        self.notification_filter_mode_cb.pack(side="left")
+        self.notification_filter_mode_cb.bind("<<ComboboxSelected>>", lambda _e: self._reload_aaid_list(reset_page=True))
 
         aaid_list_frame = tk.Frame(left_panel)
         aaid_list_frame.grid(row=2, column=0, sticky="nsew")
         aaid_list_frame.grid_rowconfigure(0, weight=1)
         aaid_list_frame.grid_columnconfigure(0, weight=1)
-        self.aaid_listbox = tk.Listbox(aaid_list_frame, exportselection=False, height=8, justify="center")
+        self.aaid_listbox = tk.Listbox(
+            aaid_list_frame,
+            exportselection=False,
+            height=8,
+            justify="center",
+            bg="white",
+            fg=UI_TEXT,
+            selectbackground="#cfe1f5",
+            selectforeground=UI_TEXT,
+            activestyle="none",
+            highlightthickness=1,
+            highlightbackground=UI_BORDER,
+            highlightcolor=UI_ACCENT,
+        )
         self.aaid_listbox.grid(row=0, column=0, sticky="nsew")
         aaid_scrollbar = tk.Scrollbar(aaid_list_frame, orient="vertical", command=self.aaid_listbox.yview)
         aaid_scrollbar.grid(row=0, column=1, sticky="ns")
         self.aaid_listbox.configure(yscrollcommand=aaid_scrollbar.set)
         self.aaid_listbox.bind("<<ListboxSelect>>", self.on_select_aaid)
 
-        pager_frame = tk.Frame(left_panel)
-        pager_frame.grid(row=3, column=0, sticky="w", pady=(4, 0))
-        self.prev_page_btn = tk.Button(pager_frame, text="Prev", width=7, command=self._go_prev_page)
+        pager_frame = tk.Frame(left_panel, bg=UI_PANEL)
+        pager_frame.grid(row=3, column=0, sticky="w", pady=(2, 0))
+        self.prev_page_btn = _new_button(pager_frame, "Prev", self._go_prev_page, variant="ghost", width=6)
         self.prev_page_btn.grid(row=0, column=0, padx=(0, 6))
-        self.next_page_btn = tk.Button(pager_frame, text="Next", width=7, command=self._go_next_page)
+        self.next_page_btn = _new_button(pager_frame, "Next", self._go_next_page, variant="ghost", width=6)
         self.next_page_btn.grid(row=0, column=1, padx=(0, 8))
         tk.Label(pager_frame, textvariable=self.aaid_page_info).grid(row=0, column=2, sticky="w")
 
-        detail_panel = tk.LabelFrame(results_frame, text="AAID Details", padx=10, pady=6)
-        detail_panel.grid(row=0, column=1, sticky="nsew")
+        detail_outer, detail_panel = make_card(results_frame, "AAID Details", row=0, column=1, padx=(0, 0), pady=(8, 0))
         detail_panel.grid_columnconfigure(1, weight=1)
         detail_panel.grid_columnconfigure(3, weight=1)
 
@@ -1785,17 +2499,43 @@ class DashboardUI:
             top_pad: int = 2,
             bottom_pad: int = 2,
         ) -> None:
-            tk.Label(detail_panel, text=left_label).grid(row=row_idx, column=0, sticky="w", pady=(top_pad, bottom_pad))
-            tk.Label(detail_panel, textvariable=left_var, anchor="w").grid(row=row_idx, column=1, sticky="ew", pady=(top_pad, bottom_pad))
+            tk.Label(
+                detail_panel,
+                text=left_label,
+                bg=UI_PANEL,
+                fg=UI_TEXT,
+                font=(UI_FONT_FAMILY, 10),
+            ).grid(row=row_idx, column=0, sticky="w", pady=(top_pad, bottom_pad))
+            tk.Label(
+                detail_panel,
+                textvariable=left_var,
+                anchor="w",
+                bg=UI_PANEL,
+                fg=UI_TEXT,
+                font=(UI_FONT_FAMILY, 10),
+            ).grid(row=row_idx, column=1, sticky="ew", pady=(top_pad, bottom_pad))
             if right_label is not None and right_var is not None:
-                tk.Label(detail_panel, text=right_label).grid(
+                tk.Label(
+                    detail_panel,
+                    text=right_label,
+                    bg=UI_PANEL,
+                    fg=UI_TEXT,
+                    font=(UI_FONT_FAMILY, 10),
+                ).grid(
                     row=row_idx,
                     column=2,
                     sticky="w",
                     pady=(top_pad, bottom_pad),
                     padx=(24, 0),
                 )
-                tk.Label(detail_panel, textvariable=right_var, anchor="w").grid(
+                tk.Label(
+                    detail_panel,
+                    textvariable=right_var,
+                    anchor="w",
+                    bg=UI_PANEL,
+                    fg=UI_TEXT,
+                    font=(UI_FONT_FAMILY, 10),
+                ).grid(
                     row=row_idx,
                     column=3,
                     sticky="ew",
@@ -1810,96 +2550,125 @@ class DashboardUI:
         add_metric_pair(13, "Final QA Start:", self.finalqa_start, "Final QA End:", self.finalqa_stop, top_pad=1, bottom_pad=1)
         add_metric_pair(14, "TechQA Person:", self.techqa_person, "Final QA Person:", self.finalqa_person, top_pad=1, bottom_pad=1)
 
-        tk.Label(detail_panel, text="Daily Notification Check (expected 1 start and 1 stop):").grid(
-            row=15, column=0, columnspan=4, sticky="w", pady=(6,2)  # Ensure no padding
+        tk.Label(detail_panel, text="Daily Notification Check (expected 1 start and 1 stop):", bg=UI_PANEL).grid(
+            row=15, column=0, columnspan=4, sticky="w", pady=(6, 2)
         )
-        daily_list_frame = tk.Frame(detail_panel, height=100)  # Explicitly set height to control space
-        daily_list_frame.grid(row=16, column=0, columnspan=4, sticky="nsew")  # Ensure no padding
-        daily_list_frame.grid_rowconfigure(0, weight=1)
-        daily_list_frame.grid_columnconfigure(0, weight=1)
+
+        daily_outer = tk.Frame(
+            detail_panel,
+            bg=UI_PANEL,
+            bd=1,
+            relief="solid",
+            highlightthickness=1,
+            highlightbackground=UI_BORDER,
+        )
+        daily_outer.grid(row=16, column=0, columnspan=4, sticky="nsew", pady=(0, 6))
+        daily_outer.grid_rowconfigure(0, weight=1)
+        daily_outer.grid_columnconfigure(0, weight=1)
+
+        daily_inner = tk.Frame(daily_outer, bg=UI_PANEL, padx=1, pady=1)
+        daily_inner.grid(row=0, column=0, sticky="nsew")
+        daily_inner.grid_rowconfigure(0, weight=1)
+        daily_inner.grid_rowconfigure(1, weight=0, minsize=18)
+        daily_inner.grid_columnconfigure(0, weight=1)
 
         self.daily_listbox = tk.Listbox(
-            daily_list_frame,
+            daily_inner,
             exportselection=False,
-            height=5,  # Adjusted height to reduce space
-            width=70,  # Retained adjusted width
+            height=10,
+            bg="white",
+            fg=UI_TEXT,
+            bd=0,
+            highlightthickness=0,
+            activestyle="none",
+            selectbackground="#cfe1f5",
+            selectforeground=UI_TEXT,
             xscrollcommand=lambda *args: daily_h_scroll.set(*args),
             yscrollcommand=lambda *args: daily_v_scroll.set(*args),
         )
-        self.daily_listbox.grid(row=0, column=0, sticky="nsew")  # Ensure alignment within the frame
+        self.daily_listbox.grid(row=0, column=0, sticky="nsew")
 
-        daily_v_scroll = tk.Scrollbar(daily_list_frame, orient="vertical", command=self.daily_listbox.yview)
+        daily_v_scroll = tk.Scrollbar(
+            daily_inner,
+            orient="vertical",
+            command=self.daily_listbox.yview,
+            bd=1,
+            relief="solid",
+            highlightthickness=0,
+            background="#c7cfda",
+            activebackground="#aeb8c7",
+            troughcolor="#eef2f7",
+            width=16,
+        )
         daily_v_scroll.grid(row=0, column=1, sticky="ns")
-        daily_h_scroll = tk.Scrollbar(daily_list_frame, orient="horizontal", command=self.daily_listbox.xview)
-        daily_h_scroll.grid(row=1, column=0, sticky="ew")
+        daily_h_scroll = tk.Scrollbar(
+            daily_inner,
+            orient="horizontal",
+            command=self.daily_listbox.xview,
+            bd=1,
+            relief="solid",
+            highlightthickness=0,
+            background="#c7cfda",
+            activebackground="#aeb8c7",
+            troughcolor="#eef2f7",
+            width=18,
+        )
+        daily_h_scroll.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
         self.daily_listbox.configure(xscrollcommand=daily_h_scroll.set, yscrollcommand=daily_v_scroll.set)
 
-        detail_panel.grid_rowconfigure(16, weight=1)
+        detail_panel.grid_rowconfigure(16, weight=1, minsize=90)
 
         frame.grid_columnconfigure(0, weight=0)
-        frame.grid_columnconfigure(1, weight=0)
-        frame.grid_columnconfigure(2, weight=0)
-        frame.grid_columnconfigure(3, weight=0)
+        frame.grid_columnconfigure(1, weight=0, minsize=control_col_width)
+        frame.grid_columnconfigure(2, weight=0, minsize=10)
+        frame.grid_columnconfigure(3, weight=0, minsize=10)
         frame.grid_columnconfigure(4, weight=1)
 
     def _refresh_mailbox_dropdown(self) -> None:
-        if not hasattr(self, "mailbox_menu"):
+        if not hasattr(self, "mailbox_menu_cb"):
             return
-        menu = self.mailbox_menu["menu"]
-        menu.delete(0, "end")
         options = self.mailbox_names if self.mailbox_names else ["Default Mailbox"]
-        for name in options:
-            menu.add_command(label=name, command=tk._setit(self.selected_mailbox, name))
+        self.mailbox_menu_cb["values"] = options
+        if self.selected_mailbox.get() not in options:
+            self.selected_mailbox.set(options[0])
 
-    def _build_statistics_panel(self, parent: tk.LabelFrame) -> None:
-        parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(0, weight=1)
+    def _build_statistics_panel(self, parent: tk.Frame) -> None:
+        parent.configure(bg=UI_PANEL)
+        # Single ordered list keeps all metrics visible and aligned.
+        parent.grid_columnconfigure(2, weight=1)
 
-        stats_left = tk.Frame(parent)
-        stats_left.grid(row=0, column=0, sticky="nw")
+        def add_stat_row(row_idx: int, label: str, value_var) -> None:
+            tk.Label(
+                parent,
+                text=label,
+                font=(UI_FONT_FAMILY, 10),
+                bg=UI_PANEL,
+                fg=UI_TEXT,
+                anchor="w",
+            ).grid(row=row_idx, column=0, sticky="w", pady=(0, 1), padx=(0, 2))
+            tk.Label(
+                parent,
+                text=":",
+                font=(UI_FONT_FAMILY, 10),
+                bg=UI_PANEL,
+                fg=UI_TEXT,
+            ).grid(row=row_idx, column=1, sticky="w", pady=(0, 1), padx=(0, 5))
+            tk.Label(
+                parent,
+                textvariable=value_var,
+                font=(UI_FONT_FAMILY, 10),
+                fg=UI_TEXT,
+                bg=UI_PANEL,
+                anchor="w",
+            ).grid(row=row_idx, column=2, sticky="w", pady=(0, 1), padx=(0, 0))
 
-        tk.Label(stats_left, text="Date Range:", font=("Segoe UI", 9, "bold")).grid(
-            row=0, column=0, sticky="w", pady=(0, 4)
-        )
-        tk.Label(stats_left, textvariable=self.stat_date_range, fg="#444").grid(
-            row=0, column=1, sticky="w", pady=(0, 4), padx=(6, 0)
-        )
-
-        tk.Label(stats_left, text="Total Applications:", font=("Segoe UI", 9, "bold")).grid(
-            row=1, column=0, sticky="w", pady=2
-        )
-        tk.Label(stats_left, textvariable=self.stat_total_apps).grid(
-            row=1, column=1, sticky="w", padx=(6, 0)
-        )
-
-        tk.Label(stats_left, text="Avg TechQA Duration:", font=("Segoe UI", 9, "bold")).grid(
-            row=2, column=0, sticky="w", pady=2
-        )
-        tk.Label(stats_left, textvariable=self.stat_avg_techqa).grid(row=2, column=1, sticky="w", padx=(6, 0))
-
-        tk.Label(stats_left, text="Avg Final QA Duration:", font=("Segoe UI", 9, "bold")).grid(
-            row=3, column=0, sticky="w", pady=2
-        )
-        tk.Label(stats_left, textvariable=self.stat_avg_finalqa).grid(row=3, column=1, sticky="w", padx=(6, 0))
-
-        tk.Label(stats_left, text="Avg QA Completion:", font=("Segoe UI", 9, "bold")).grid(
-            row=4, column=0, sticky="w", pady=2
-        )
-        tk.Label(stats_left, textvariable=self.stat_avg_totalqa).grid(row=4, column=1, sticky="w", padx=(6, 0))
-
-        tk.Label(stats_left, text="Missing Start Notifications:", font=("Segoe UI", 9, "bold")).grid(
-            row=5, column=0, sticky="w", pady=2
-        )
-        tk.Label(stats_left, textvariable=self.stat_missing_start, fg="red").grid(
-            row=5, column=1, sticky="w", padx=(6, 0)
-        )
-
-        tk.Label(stats_left, text="Missing Stop Notifications:", font=("Segoe UI", 9, "bold")).grid(
-            row=6, column=0, sticky="w", pady=2
-        )
-        tk.Label(stats_left, textvariable=self.stat_missing_stop, fg="red").grid(
-            row=6, column=1, sticky="w", padx=(6, 0)
-        )
+        add_stat_row(0, "Date Range", self.stat_date_range)
+        add_stat_row(1, "Total Applications", self.stat_total_apps)
+        add_stat_row(2, "Avg TechQA Duration", self.stat_avg_techqa)
+        add_stat_row(3, "Avg Final QA Duration", self.stat_avg_finalqa)
+        add_stat_row(4, "Avg QA Completion", self.stat_avg_totalqa)
+        add_stat_row(5, "Missing Start Notifications", self.stat_missing_start)
+        add_stat_row(6, "Missing Stop Notifications", self.stat_missing_stop)
 
     def _toggle_graphs(self) -> None:
         if self.graphs_enabled.get():
@@ -1945,7 +2714,7 @@ class DashboardUI:
             tk.Label(
                 self.graph_frame,
                 text="matplotlib not installed.\nRun: pip install matplotlib",
-                fg="gray",
+                fg=UI_TEXT,
                 justify="left",
             ).pack(anchor="w")
             return
@@ -2286,7 +3055,7 @@ class DashboardUI:
                 flags.append("[TechQA Overlap]")
             if flags:
                 self.daily_listbox.insert(tk.END, " ".join(flags))
-                self.daily_listbox.itemconfig(0, fg="blue")
+                self.daily_listbox.itemconfig(0, fg=UI_TEXT)
         
         daily_counts = self.daily_counts_by_aaid.get(aaid, {})
         if not daily_counts:
@@ -2317,7 +3086,7 @@ class DashboardUI:
             self.daily_listbox.insert(tk.END, row_text)
             row_index = self.daily_listbox.size() - 1
             if is_alert:
-                self.daily_listbox.itemconfig(row_index, fg="red")
+                self.daily_listbox.itemconfig(row_index, fg="#c62828")
 
     def export_excel(self):
         if not self.stats_by_aaid:
@@ -2362,6 +3131,11 @@ class DashboardUI:
             filter_aaid = None
             aaid_filter_str = self.aaid_filter.get().strip()
             if aaid_filter_str:
+                # Security: Check filter input for suspicious patterns
+                filter_threat = _detect_pentest_attempt(aaid_filter_str, "aaid_filter")
+                if filter_threat:
+                    _log_security_event(filter_threat, {"filter": aaid_filter_str})
+                
                 filter_list = [aaid.strip().upper() for aaid in aaid_filter_str.split(",") if aaid.strip()]
                 if len(filter_list) > 10:
                     self.root.after(0, lambda: messagebox.showerror("Too many AAIDs", "You can search for up to 10 AAIDs at a time."))
@@ -2385,6 +3159,11 @@ class DashboardUI:
                 return
 
             subject_contains = self.subject_contains.get()
+            # Security: Check subject filter for suspicious patterns
+            if subject_contains:
+                subject_threat = _detect_pentest_attempt(subject_contains, "subject_filter")
+                if subject_threat:
+                    _log_security_event(subject_threat, {"subject_filter": subject_contains})
 
             try:
                 start_date, end_date = get_date_range(
@@ -2526,18 +3305,32 @@ def main():
         app.refresh()
         root.mainloop()
     except Exception as exc:
+        import traceback
+        traceback_text = traceback.format_exc()
+
         if SAFE_MODE:
             error_message = "[FATAL ERROR] Application terminated unexpectedly."
         else:
-            import traceback
-            error_message = f"[FATAL ERROR] {exc}\n{traceback.format_exc()}"
+            error_message = f"[FATAL ERROR] {exc}\n{traceback_text}"
+
         print(error_message)
+        log_path = _current_log_path()
         try:
-            log_path = _current_log_path()
             rotate_log_if_needed(log_path)
             with open(log_path, "a", encoding="utf-8") as log_file:
                 log_file.write(error_message + "\n")
+                # Preserve traceback in logs even when SAFE_MODE hides it from console.
+                if SAFE_MODE:
+                    log_file.write(f"[FATAL TRACEBACK]\n{traceback_text}\n")
         except OSError:
+            pass
+
+        try:
+            messagebox.showerror(
+                "Fatal Error",
+                f"Application terminated unexpectedly.\nSee logs for details:\n{log_path}",
+            )
+        except Exception:
             pass
 
 
