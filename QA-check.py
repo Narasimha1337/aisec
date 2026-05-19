@@ -1237,12 +1237,15 @@ def compute_aggregate_statistics(stats_by_aaid: dict[str, DashboardStats]) -> Ag
                 (stats.techqa_stop - stats.techqa_start).total_seconds()
                 + (stats.finalqa_stop - stats.finalqa_start).total_seconds()
             )
-        # Only count AAIDs that have at least one START or STOP notification (exclude QA-only)
-        has_any_start_or_stop = stats.start_notifications_count > 0 or stats.stop_notifications_count > 0
+        # Only count AAIDs that have at least one START or STOP notification (exclude QA-only).
+        # Treat imbalanced Start/Stop totals as missing on the lower side.
+        start_count = stats.start_notifications_count
+        stop_count = stats.stop_notifications_count
+        has_any_start_or_stop = start_count > 0 or stop_count > 0
         if has_any_start_or_stop:
-            if stats.start_notifications_count == 0:
+            if start_count < stop_count:
                 aggregate.missing_start_count += 1
-            if stats.stop_notifications_count == 0:
+            if stop_count < start_count:
                 aggregate.missing_stop_count += 1
 
     if techqa_durations:
@@ -1768,6 +1771,7 @@ class DashboardUI:
         self.stats_by_aaid: dict[str, DashboardStats] = {}
         self.daily_counts_by_aaid: dict[str, dict[str, DailyNotificationCounts]] = {}
         self._aaid_search_after_id: Optional[str] = None
+        self._refresh_generation: int = 0
         self.aaid_page_size = 50
         self.aaid_current_page = 0
         self.aaid_total_pages = 0
@@ -2983,9 +2987,9 @@ class DashboardUI:
                 display += f"  {flags_str}"
             self.aaid_listbox.insert(tk.END, display)
 
-            # Highlight AAIDs with missing Start or Stop notifications.
+            # Highlight AAIDs with any Start/Stop imbalance.
             row_index = self.aaid_listbox.size() - 1
-            if item_stats.start_notifications_count == 0 or item_stats.stop_notifications_count == 0:
+            if item_stats.start_notifications_count != item_stats.stop_notifications_count:
                 self.aaid_listbox.itemconfig(row_index, fg="#c62828")
 
     def on_select_aaid(self, _event=None):
@@ -3079,10 +3083,12 @@ class DashboardUI:
         self.root.after(100, self._start_refresh_thread)
 
     def _start_refresh_thread(self):
-        thread = threading.Thread(target=self._refresh_worker, daemon=True)
+        self._refresh_generation += 1
+        generation = self._refresh_generation
+        thread = threading.Thread(target=self._refresh_worker, args=(generation,), daemon=True)
         thread.start()
 
-    def _refresh_worker(self):
+    def _refresh_worker(self, generation: int = 0):
         try:
             self._log_debug("Starting refresh worker.")
             system_now = datetime.now()
@@ -3140,7 +3146,6 @@ class DashboardUI:
 
             try:
                 debug_enabled = self.debug_enabled.get()
-                logging.getLogger().setLevel(logging.DEBUG if debug_enabled else logging.INFO)
                 selected_mailbox = self.selected_mailbox.get().strip()
                 if selected_mailbox == ALL_MAILBOXES_OPTION:
                     messages = read_messages_from_all_mailboxes(
@@ -3215,7 +3220,10 @@ class DashboardUI:
                         f"Found {len(self.aaid_keys)} AAID(s) from {len(messages)} message(s)."
                     )
 
-            self.root.after(0, update_ui)
+            if generation == self._refresh_generation:
+                self.root.after(0, update_ui)
+            else:
+                self._log_debug(f"Refresh generation {generation} superseded; discarding results.")
         except Exception as exc:
             self.root.after(0, lambda: self.status_var.set(""))
             self.root.after(
